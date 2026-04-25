@@ -1,8 +1,6 @@
 ---
-title: AI Translator Thesis
-emoji: 🌍
-colorFrom: blue
-colorTo: green
+title: AI Translator Backend
+emoji: 🚀
 sdk: docker
 app_port: 7860
 ---
