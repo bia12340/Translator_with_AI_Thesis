@@ -259,9 +259,10 @@ function App() {
 
       const sLang = (data.source_lang || 'AUTO').toUpperCase()
       const tLang = (data.target_lang || targetLang || 'EN').toUpperCase()
-      setLiveTranscript('')
-      setLiveTranslation('')
-      setShowLive(false)
+      setLiveTranscript(data.original_text || '')
+      setLiveSourceLang(sLang)
+      setLiveTranslation(data.translated_text || '')
+      setShowLive(true)
 
       const entry = {
         id: Date.now() + Math.random(),

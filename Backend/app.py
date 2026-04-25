@@ -47,7 +47,7 @@ app.add_middleware(
 )
 
 # Inițializăm Groq (se va citi din variabila de mediu pe HF sau local)
-client = Groq(api_key="GROQ_API_KEY")  # Asigură-te că ai setat variabila de mediu GROQ_API_KEY
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))  # Asigură-te că ai setat variabila de mediu GROQ_API_KEY
 print("[✓] Groq client inițializat cu succes")
 
 # Memoria conversației per utilizator (stochează ultimele 10 replici per user)
