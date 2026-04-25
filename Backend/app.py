@@ -14,6 +14,7 @@ from fastapi import BackgroundTasks, Header
 import json
 import asyncio
 
+load_dotenv() # Aceasta linie cauta fisierul .env si incarca cheia
 
 # --- Startup Cleanup for Orphaned Audio Files ---
 def cleanup_audio_files():
