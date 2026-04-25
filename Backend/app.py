@@ -13,6 +13,7 @@ from groq import Groq # Importăm clientul Groq
 from fastapi import BackgroundTasks, Header
 import json
 import asyncio
+from dotenv import load_dotenv
 
 load_dotenv() # Aceasta linie cauta fisierul .env si incarca cheia
 
