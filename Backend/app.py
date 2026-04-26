@@ -551,14 +551,21 @@ async def process_audio(request: Request, audio: UploadFile = File(...), target_
         detected_lang = getattr(transcription, 'language', 'auto')
 
         # Returnăm datele cu limba în care s-a tradus (din AI result)
+        # Detectăm dacă suntem pe Hugging Face pentru a forța HTTPS
+        base_url = str(request.base_url).rstrip('/')
+        if ".hf.space" in base_url:
+            base_url = base_url.replace("http://", "https://")
+
+        # Returnăm datele cu limba în care s-a tradus (din AI result)
         response_data = {
             "source_lang": detected_lang,
             "target_lang": detected_ai_lang, 
             "original_text": original_text,
             "translated_text": translated_text,
-            "audio_url": f"{str(request.base_url).rstrip('/')}/get_audio/{output_mp3}",
+            "audio_url": f"{base_url}/get_audio/{output_mp3}",
             "status": "success"
         }
+
         print(f"[✓] Response gata: {response_data}")
         return response_data
     except Exception as e:
@@ -598,9 +605,9 @@ async def get_audio(file_name: str, background_tasks: BackgroundTasks):
     print(f"[📥] /get_audio apelat pentru: {file_name}")
 
     if os.path.exists(file_name):
-        print(f"[✓] Fișier găsit, trimit și șterg după 10s...")
+        print(f"[✓] Fișier găsit, trimit și șterg după 15s...")
         async def remove_file_with_delay():
-            await asyncio.sleep(10)  # Așteptăm 10 secunde înainte să ștergem
+            await asyncio.sleep(15)  # Așteptăm 15 secunde înainte să ștergem
             try:
                 if os.path.exists(file_name):
                     os.remove(file_name)

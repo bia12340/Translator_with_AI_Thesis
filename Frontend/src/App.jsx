@@ -4,7 +4,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:7860';
 
 function App() {
   const [isListening, setIsListening] = useState(false)
-  const [status, setStatus] = useState('Status: Deconectat')
+  const [status, setStatus] = useState('Status: Oprit. Apasă butonul pentru a începe.')
   const [logs, setLogs] = useState([])
   const [showHistoryPage, setShowHistoryPage] = useState(false)
   const [accountHistory, setAccountHistory] = useState([])
@@ -39,11 +39,32 @@ function App() {
   const pcmChunks = useRef([])
   const sampleRateRef = useRef(48000)
   const isCapturing = useRef(false)
-  const keepListening = useRef(true)
+  const keepListening = useRef(false)
   const recognitionRef = useRef(null)
   const recognitionActive = useRef(false)
   const sessionIdRef = useRef(`session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`)
   const persistedEntryIdsRef = useRef(new Set())
+
+  const toggleTranslator = async () => {
+    // 1. Dacă sistemul audio e "adormit" (specific browserelor), îl trezim
+    if (mediaAudioContext.current && mediaAudioContext.current.state === 'suspended') {
+      await mediaAudioContext.current.resume();
+    }
+
+    if (!isListening) {
+      // Dacă e oprit, îl pornim
+      keepListening.current = true;
+      setIsListening(true);
+      setStatus('Status: Activ - Te ascult...');
+      startListening();
+    } else {
+      // Dacă e pornit, îl oprim
+      keepListening.current = false;
+      setIsListening(false);
+      setStatus('Status: Oprit.');
+      stopListening();
+    }
+  };
 
   const generateClientEntryId = () => {
     if (window.crypto?.randomUUID) {
@@ -280,24 +301,24 @@ function App() {
 
       if (!data.audio_url) return
 
-      const res = await fetch(data.audio_url)
-      if (!res.ok) throw new Error('Audio not found')
-      const ttsBlob = await res.blob()
-      const url = URL.createObjectURL(ttsBlob)
-      const audio = new Audio(url)
+        const res = await fetch(data.audio_url)
+        if (!res.ok) throw new Error('Audio not found')
+        const ttsBlob = await res.blob()
+        const url = URL.createObjectURL(ttsBlob)
+        const audio = new Audio(url)
 
-      setStatus('Status: Redau traducerea...')
-      await new Promise((resolve, reject) => {
-        audio.play().catch(reject)
-        audio.onended = () => {
-          URL.revokeObjectURL(url)
-          resolve()
-        }
-        audio.onerror = () => {
-          URL.revokeObjectURL(url)
-          reject(new Error('Eroare redare audio'))
-        }
-      })
+        setStatus('Status: Redau traducerea...')
+        await new Promise((resolve, reject) => {
+          audio.play().catch(reject)
+          audio.onended = () => {
+            URL.revokeObjectURL(url)
+            resolve()
+          }
+          audio.onerror = () => {
+            URL.revokeObjectURL(url)
+            reject(new Error('Eroare redare audio'))
+          }
+        })
     } catch (e) {
       console.error('Eroare comunicare server:', e)
       setStatus('Status: Eroare server')
@@ -475,31 +496,31 @@ function App() {
   const startListening = async () => {
     try {
       if (!mediaStream.current) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        })
-        mediaStream.current = stream
-        mediaAudioContext.current = new (window.AudioContext || window.webkitAudioContext)()
-        sampleRateRef.current = mediaAudioContext.current.sampleRate
-        const source = mediaAudioContext.current.createMediaStreamSource(stream)
-        mediaSource.current = source
-        mediaAnalyser.current = mediaAudioContext.current.createAnalyser()
-        mediaAnalyser.current.fftSize = 2048
-        mediaProcessor.current = mediaAudioContext.current.createScriptProcessor(4096, 1, 1)
-        mediaProcessor.current.onaudioprocess = (event) => {
-          if (!isCapturing.current) return
-          const input = event.inputBuffer.getChannelData(0)
-          pcmChunks.current.push(new Float32Array(input))
-        }
-        source.connect(mediaAnalyser.current)
-        source.connect(mediaProcessor.current)
-        mediaProcessor.current.connect(mediaAudioContext.current.destination)
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      })
+      mediaStream.current = stream
+      mediaAudioContext.current = new (window.AudioContext || window.webkitAudioContext)()
+      sampleRateRef.current = mediaAudioContext.current.sampleRate
+      const source = mediaAudioContext.current.createMediaStreamSource(stream)
+      mediaSource.current = source
+      mediaAnalyser.current = mediaAudioContext.current.createAnalyser()
+      mediaAnalyser.current.fftSize = 2048
+      mediaProcessor.current = mediaAudioContext.current.createScriptProcessor(4096, 1, 1)
+      mediaProcessor.current.onaudioprocess = (event) => {
+        if (!isCapturing.current) return
+        const input = event.inputBuffer.getChannelData(0)
+        pcmChunks.current.push(new Float32Array(input))
       }
-
+      source.connect(mediaAnalyser.current)
+      source.connect(mediaProcessor.current)
+      mediaProcessor.current.connect(mediaAudioContext.current.destination)
+      }
+      
       setIsListening(true)
       startRecorderCapture()
     } catch (err) {
@@ -540,12 +561,11 @@ function App() {
   }
 
   useEffect(() => {
-    keepListening.current = true
-    startListening()
+    // Am scos pornirea automată. 
+    // Acum doar curățăm resursele când închidem pagina.
     return () => {
       stopListening()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -670,10 +690,29 @@ function App() {
             </div>
           </div>
         )}
-
+        <div style={{ textAlign: 'center', margin: '20px 0' }}>
+          <button
+            onClick={toggleTranslator}
+            className={isListening ? "btn-stop" : "btn-start"}
+            style={{
+              padding: '15px 30px',
+              fontSize: '18px',
+              borderRadius: '50px',
+              cursor: 'pointer',
+              backgroundColor: isListening ? '#ff4d4d' : '#4CAF50',
+              color: 'white',
+              border: 'none',
+              fontWeight: 'bold',
+              boxShadow: '0 4px 8px rgba(0,0,0,0.2)'
+            }}
+          >
+            {isListening ? '🔴 Oprește Translatorul' : '🟢 Pornește Translatorul'}
+          </button>
+        </div>
         {!showHistoryPage && <div id="logs">
           {logs.length === 0 ? (
             <p className="hint">Se ascultă continuu. Vorbește când vrei.</p>
+            
           ) : (
             logs.map((entry) => (
               <div key={entry.id} className="entry">
