@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import './App.css'
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:7860';
 
 function App() {
   const [isListening, setIsListening] = useState(false)
@@ -245,7 +246,7 @@ function App() {
     formData.append('audio', blob, 'audio.wav')
 
     try {
-      const response = await fetch(`http://127.0.0.1:7860/process?target_lang=${targetLang}`, {
+      const response = await fetch(`${API_BASE_URL}/process?target_lang=${targetLang}`, {
         method: 'POST',
         headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
         body: formData,
@@ -315,7 +316,7 @@ function App() {
     if (!unsaved.length) return
 
     try {
-      const response = await fetch('http://127.0.0.1:7860/history/bulk', {
+      const response = await fetch(`${API_BASE_URL}/history/bulk`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -346,7 +347,7 @@ function App() {
     if (!token) return
     setHistoryLoading(true)
     try {
-      const response = await fetch('http://127.0.0.1:7860/history', {
+      const response = await fetch(`${API_BASE_URL}/history`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await response.json()
@@ -387,7 +388,7 @@ function App() {
   const handleSignup = async () => {
     setAuthError('')
     try {
-      const response = await fetch('http://127.0.0.1:7860/auth/signup', {
+      const response = await fetch(`${API_BASE_URL}/auth/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -412,7 +413,7 @@ function App() {
   const handleLogin = async () => {
     setAuthError('')
     try {
-      const response = await fetch('http://127.0.0.1:7860/auth/login', {
+      const response = await fetch(`${API_BASE_URL}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -451,7 +452,7 @@ function App() {
     const token = authToken || localStorage.getItem('translator_auth_token') || ''
     if (!token) return
     try {
-      const response = await fetch('http://127.0.0.1:7860/auth/profile', {
+      const response = await fetch(`${API_BASE_URL}/auth/profile`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
