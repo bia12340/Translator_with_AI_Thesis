@@ -5,7 +5,7 @@ import requests
 import sqlite3
 import hashlib
 import secrets
-from fastapi import FastAPI, UploadFile, File, Query
+from fastapi import FastAPI, UploadFile, File, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from gtts import gTTS
 from fastapi.responses import FileResponse
@@ -44,6 +44,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"] # Aceasta linie ajută browserul să vadă fișierul audio
 )
 
 # Inițializăm Groq (se va citi din variabila de mediu pe HF sau local)
@@ -454,7 +455,7 @@ async def history_list(authorization: str = Header(default=""), order: str = Que
     }
 
 @app.post("/process")
-async def process_audio(audio: UploadFile = File(...), target_lang: str = 'en', authorization: str = Header(default="")):
+async def process_audio(request: Request, audio: UploadFile = File(...), target_lang: str = 'en', authorization: str = Header(default="")):
     print(f"\n[📥] /process apelat | Target lang: {target_lang}")
     unique_id = str(uuid.uuid4())
     original_name = (audio.filename or "").lower()
@@ -555,7 +556,7 @@ async def process_audio(audio: UploadFile = File(...), target_lang: str = 'en', 
             "target_lang": detected_ai_lang, 
             "original_text": original_text,
             "translated_text": translated_text,
-            "audio_url": f"http://127.0.0.1:7860/get_audio/{output_mp3}",
+            "audio_url": f"{str(request.base_url).rstrip('/')}/get_audio/{output_mp3}",
             "status": "success"
         }
         print(f"[✓] Response gata: {response_data}")
