@@ -2,7 +2,7 @@ import os
 import uuid
 import uvicorn
 import requests
-import sqlite3
+from supabase import create_client, Client
 import hashlib
 import secrets
 from fastapi import FastAPI, UploadFile, File, Query, Request
@@ -16,6 +16,13 @@ import asyncio
 from dotenv import load_dotenv
 
 load_dotenv() # Aceasta linie cauta fisierul .env si incarca cheia
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# Aceasta este variabila prin care codul tău va vorbi cu baza de date
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+print("[✓] Conexiune Supabase inițializată")
 
 # --- Startup Cleanup for Orphaned Audio Files ---
 def cleanup_audio_files():
@@ -34,7 +41,6 @@ def cleanup_audio_files():
 cleanup_audio_files()
 
 app = FastAPI()
-DB_PATH = "users.db"
 auth_sessions = {}
 
 # Permitem accesul de la frontend-ul tău local
@@ -53,45 +59,6 @@ print("[✓] Groq client inițializat cu succes")
 
 # Memoria conversației per utilizator (stochează ultimele 10 replici per user)
 user_chat_histories = {}
-
-def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                email TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                salt TEXT NOT NULL,
-                main_language TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS translation_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                session_id TEXT,
-                client_entry_id TEXT NOT NULL,
-                source_lang TEXT,
-                target_lang TEXT,
-                original_text TEXT NOT NULL,
-                translated_text TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(user_id) REFERENCES users(id),
-                UNIQUE(user_id, client_entry_id)
-            )
-            """
-        )
-        conn.commit()
-        # Backward-compatible migration for existing DBs
-        cols = [row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
-        if "main_language" not in cols:
-            conn.execute("ALTER TABLE users ADD COLUMN main_language TEXT")
-            conn.commit()
 
 def hash_password(password: str, salt: str) -> str:
     return hashlib.pbkdf2_hmac(
@@ -123,43 +90,52 @@ def create_user(username: str, email: str, password: str, main_language: str = "
     salt = secrets.token_hex(16)
     password_hash = hash_password(password, salt)
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO users (username, email, password_hash, salt) VALUES (?, ?, ?, ?)",
-                "INSERT INTO users (username, email, password_hash, salt, main_language) VALUES (?, ?, ?, ?, ?)",
-                (username, email, password_hash, salt, main_lang),
-            )
-            conn.commit()
+        user_data = {
+            "username": (username or "").strip(),
+            "email": (email or "").strip().lower(),
+            "password_hash": password_hash,
+            "salt": salt,
+            "main_language": normalize_lang_code(main_language)
+        }
+        supabase.table("users").insert(user_data).execute()
         return True, None
-    except sqlite3.IntegrityError:
-        return False, "Username sau email deja există"
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[✗] Eroare reală Supabase: {error_msg}")
+        # Daca eroarea contine "already exists", stim ca e duplicat, altfel e alta problema
+        if "already exists" in error_msg.lower():
+            return False, "Username sau email deja există"
+        return False, f"Eroare tehnică: {error_msg}"
 
 def verify_user(email: str, password: str):
     email = (email or "").strip().lower()
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT id, username, email, password_hash, salt, main_language FROM users WHERE email = ?",
-            (email,),
-        ).fetchone()
-
-    if not row:
+    
+    # Căutăm utilizatorul după email în Supabase
+    response = supabase.table("users").select("*").eq("email", email).execute()
+    
+    if not response.data:
         return None
 
-    user_id, username, user_email, password_hash, salt, main_language = row
-    if hash_password(password, salt) != password_hash:
+    user = response.data[0]
+    # Verificăm parola folosind hash-ul salvat
+    if hash_password(password, user["salt"]) != user["password_hash"]:
         return None
 
-    return {"id": user_id, "username": username, "email": user_email, "main_language": main_language}
+    return {
+        "id": user["id"], 
+        "username": user["username"], 
+        "email": user["email"], 
+        "main_language": user["main_language"]
+    }
 
 def update_user_main_language(user_id: int, main_language: str):
     main_lang = normalize_lang_code(main_language)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "UPDATE users SET main_language = ? WHERE id = ?",
-            (main_lang, user_id),
-        )
-        conn.commit()
-    return main_lang
+    try:
+        supabase.table("users").update({"main_language": main_lang}).eq("id", user_id).execute()
+        return main_lang
+    except Exception as e:
+        print(f"[✗] Eroare update limbă Supabase: {e}")
+        return main_lang
 
 def get_user_from_token(token: str):
     if not token:
@@ -167,42 +143,31 @@ def get_user_from_token(token: str):
     return auth_sessions.get(token)
 
 def save_history_entries(user_id: int, entries: list):
+    print(f"[*] save_history_entries apelat pentru user {user_id}. Primite {len(entries) if entries else 0} intrări.")
     if not entries:
         return
-    rows = []
-    for entry in entries:
-        original_text = (entry.get("original_text") or "").strip()
-        translated_text = (entry.get("translated_text") or "").strip()
-        client_entry_id = str(entry.get("client_entry_id") or "").strip()
-        if not original_text or not translated_text or not client_entry_id:
-            continue
-        rows.append(
-            (
-                user_id,
-                str(entry.get("session_id") or ""),
-                client_entry_id,
-                str(entry.get("source_lang") or ""),
-                str(entry.get("target_lang") or ""),
-                original_text,
-                translated_text,
-            )
-        )
+    
+    try:
+        supabase_rows = []
+        for entry in entries:
+            # Extragem datele cu mare atenție la nume
+            row = {
+                "user_id": user_id,
+                "session_id": str(entry.get("session_id") or uuid.uuid4()),
+                "client_entry_id": str(entry.get("client_entry_id") or uuid.uuid4()),
+                "source_lang": str(entry.get("source_lang") or "auto"),
+                "target_lang": str(entry.get("target_lang") or "en"),
+                "original_text": str(entry.get("original_text") or "").strip(),
+                "translated_text": str(entry.get("translated_text") or "").strip()
+            }
+            supabase_rows.append(row)
 
-    if not rows:
-        return
-
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.executemany(
-            """
-            INSERT OR IGNORE INTO translation_history
-            (user_id, session_id, client_entry_id, source_lang, target_lang, original_text, translated_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-        conn.commit()
-
-init_db()
+        if supabase_rows:
+            # Folosim upsert pentru a evita erori de duplicare
+            result = supabase.table("translation_history").upsert(supabase_rows).execute()
+            print(f"[✓] SUCCES: {len(supabase_rows)} rânduri salvate în Supabase.")
+    except Exception as e:
+        print(f"[✗] EROARE CRITICĂ la salvarea în Supabase: {e}")
 
 def query_google_translate(text, target_lang="en"):
     """Traducere folosind Google Translate API (v1 neoficial)"""
@@ -254,24 +219,24 @@ def ai_agent_process(text, user="default", use_memory=True, default_target_lang=
                 2. Identifică LIMBA ȚINTĂ și TEXTUL de tradus.
                 3. DETERMINĂ CODUL ISO 639-1 CORECT al limbii țintă (en, ro, es, fr, de, it, pt, zh, ja, ko, ru, ar, etc.)
                 4. TRADUCE textul ÎN ACEA LIMBĂ.
-                5. Returnează NUMAI JSON: {"text": "traducerea_exacta", "lang": "cod_iso_corect"}
+                5. Returnează NUMAI JSON: {"text": "traducerea_exacta", "source_lang": "cod_sursa", "target_lang": "cod_tinta"}
 
                 EXEMPLE DE CERERI ȘI RĂSPUNSURI CORECTE:
                 
                 INPUT: "Tradu asta în engleza: Salut cum ești?"  
-                OUTPUT: {"text": "Hello, how are you?", "lang": "en"}
+                OUTPUT: {"text": "Hello, how are you?", "source_lang": "ro", "target_lang": "en"}
                 
                 INPUT: "Translate into Spanish I care about you"  
-                OUTPUT: {"text": "Me importas mucho", "lang": "es"}
+                OUTPUT: {"text": "Me importas mucho", "source_lang": "en", "target_lang": "es"}
                 
                 INPUT: "Tradu în romana: Hello world"  
-                OUTPUT: {"text": "Salut lume", "lang": "ro"}
+                OUTPUT: {"text": "Salut lume", "source_lang": "en", "target_lang": "ro"}
                 
                 INPUT: "Traduc în limba franceză vreau să merg la mare"  
-                OUTPUT: {"text": "Je veux aller à la mer", "lang": "fr"}
+                OUTPUT: {"text": "Je veux aller à la mer", "source_lang": "ro", "target_lang": "fr"}
                 
                 INPUT: "Translate into Mandarin Chinese I want ice cream"  
-                OUTPUT: {"text": "我想要冰淇淋", "lang": "zh"}
+                OUTPUT: {"text": "我想要冰淇淋", "source_lang": "en", "target_lang": "zh"}
 
                 REGULI STRICTE:
                 - CODUL LIMBII TREBUIE SĂ FIE ISO 639-1 CORECT: "en", "ro", "es", "fr", "de", "it", "pt", "zh", "ja", "ko", "ru", "ar", "pl", "nl", "tr", "vi", "th", "hi", etc.
@@ -279,7 +244,8 @@ def ai_agent_process(text, user="default", use_memory=True, default_target_lang=
                 - NU ADĂUGA explicații, comentarii sau alt text.
                 - Răspunsul trebuie să fie STRICT JSON valid.
                 - Cheia "text" = traducerea completă
-                - Cheia "lang" = codul ISO 639-1 al limbii în care ai tradus
+                - Cheia "source_lang" = codul ISO 639-1 al limbii sursă
+                - Cheia "target_lang" = codul ISO 639-1 al limbii țintă
                 - Dacă nu-i clar ce limbă dorește, folosește limba default "{default_target_lang}".
                 - Dacă textul include explicit "translate into X" / "tradu în X", urmează explicit X.
                 """
@@ -324,12 +290,13 @@ def ai_agent_process(text, user="default", use_memory=True, default_target_lang=
             print(f"[✗] Eroare parse JSON: {je}")
             print(f"[*] Response text: {response_text}")
             # Fallback: returnez textul original
-            return {"text": text, "lang": "en"}
+            return {"text": text, "source_lang": "en", "target_lang": "en"}
        
         # Validare că avem text și lang
-        if "text" not in result or "lang" not in result:
+         # Validare că avem text și lang
+        if "text" not in result or "source_lang" not in result or "target_lang" not in result:
             print(f"[⚠] Response JSON invalid (missing keys): {result}")
-            return {"text": text, "lang": "en"}
+            return {"text": text, "source_lang": "auto", "target_lang": "en"}
 
         if use_memory:
             # Salvăm în memorie ce s-a vorbit
@@ -354,7 +321,7 @@ def ai_agent_process(text, user="default", use_memory=True, default_target_lang=
         return {"text": text, "lang": "en"}
 
 @app.post("/ai_translate")
-async def ai_translate(payload: dict):
+async def ai_translate(payload: dict, authorization: str = Header(default="")):
     """Endpoint pentru traducere inteligentă cu memorie folosind Groq"""
     print(f"\n[📥] /ai_translate apelat | Payload: {payload}")
     text = payload.get("text", "").strip()
@@ -367,7 +334,18 @@ async def ai_translate(payload: dict):
     print(f"[*] Procesez cu AI: '{text}' pentru user: {user}")
     result = ai_agent_process(text, user)
     
-    print(f"[✓] Răspuns AI: {result}")
+    token = authorization.replace("Bearer ", "").strip()
+    current_user = get_user_from_token(token)
+
+    if current_user:
+        history_item = {
+            "source_lang": result.get("source_lang", "auto").lower(),
+            "target_lang": result.get("target_lang", "en").lower(),
+            "original_text": text,
+            "translated_text": result.get("text", "")
+        }
+        save_history_entries(current_user["id"], [history_item])
+
     return result
 
 @app.post("/auth/signup")
@@ -416,43 +394,57 @@ async def auth_profile(payload: dict, authorization: str = Header(default="")):
     return {"status": "success", "user": user}
 
 @app.post("/history/bulk")
-async def history_bulk(payload: dict, authorization: str = Header(default="")):
-    token = authorization.replace("Bearer ", "").strip()
+async def history_bulk_save(request: Request, authorization: str = Header(None)):
+    token = (authorization or "").replace("Bearer ", "").strip()
     user = get_user_from_token(token)
     if not user:
-        return {"status": "failed", "error": "Not authenticated"}
-
-    entries = payload.get("entries", [])
-    if not isinstance(entries, list):
-        return {"status": "failed", "error": "entries must be a list"}
-
-    save_history_entries(user["id"], entries)
-    return {"status": "success"}
+        return {"status": "error", "message": "Neautorizat"}
+    
+    try:
+        payload = await request.json()
+        # Încercăm să luăm datele din 'entries' sau 'history'
+        entries = payload.get("entries") or payload.get("history") or []
+        
+        print(f"[*] /history/bulk a primit {len(entries)} elemente de la frontend.")
+        
+        # APELĂM FUNCȚIA DE SALVARE
+        save_history_entries(user["id"], entries)
+        
+        return {"status": "success"}
+    except Exception as e:
+        print(f"[✗] Eroare la procesarea cererii bulk: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.get("/history")
 async def history_list(authorization: str = Header(default=""), order: str = Query(default="desc")):
+    # 1. Extragere și verificare Token
     token = authorization.replace("Bearer ", "").strip()
     user = get_user_from_token(token)
     if not user:
         return {"status": "failed", "error": "Not authenticated"}
 
-    sort_dir = "DESC" if order.lower() != "asc" else "ASC"
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            f"""
-            SELECT id, session_id, client_entry_id, source_lang, target_lang, original_text, translated_text, created_at
-            FROM translation_history
-            WHERE user_id = ?
-            ORDER BY id {sort_dir}
-            """,
-            (user["id"],),
-        ).fetchall()
+    try:
+        # 2. Pregătire sortare (True pentru crescător, False pentru descrescător)
+        is_ascending = (order.lower() == "desc")
+        
+        # 3. Cerem datele de la Supabase
+        # .select("*") ia toate coloanele
+        # .eq("user_id", ...) filtrează doar pentru user-ul logat
+        # .order(...) sortează după id sau created_at
+        response = supabase.table("translation_history") \
+            .select("*") \
+            .eq("user_id", user["id"]) \
+            .order("id", desc=not is_ascending) \
+            .execute()
 
-    return {
-        "status": "success",
-        "entries": [dict(r) for r in rows],
-    }
+        # 4. Trimitem datele înapoi la Frontend
+        return {
+            "status": "success",
+            "entries": response.data, # .data conține lista de rânduri din tabel
+        }
+    except Exception as e:
+        print(f"[✗] Eroare la citire istoric Supabase: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.post("/process")
 async def process_audio(request: Request, audio: UploadFile = File(...), target_lang: str = 'en', authorization: str = Header(default="")):
@@ -514,36 +506,33 @@ async def process_audio(request: Request, audio: UploadFile = File(...), target_
         )
         print(f"[*] AI Result: {ai_result}")
         
+        # Extragem totul din rezultatul AI
         translated_text = ai_result.get('text', original_text)
-        detected_ai_lang = ai_result.get('lang', 'en')
-        
-        # Fallback: dacă ceva nu-i bine, returnez textul original
-        if not translated_text or translated_text == original_text:
-            print("[⚠] AI nu a tradus corect, folosesc textul original")
-            translated_text = original_text
-            detected_ai_lang = 'en'
+        # Prioritate: 1. Limba detectată de AI, 2. Limba detectată de Whisper, 3. 'auto'
+        source_lang = ai_result.get('source_lang') or getattr(transcription, 'language', 'auto')
+        # Prioritate: 1. Limba cerută de AI, 2. Limba cerută în URL (target_lang)
+        final_target_lang = final_target_lang = ai_result.get('target_lang') or ai_result.get('lang') or target_lang
 
         # 3. GENERARE AUDIO UMAN (gTTS) - cu limba din AI result
-        print(f"[*] Genereaza audio cu gTTS... limbă: {detected_ai_lang}")
+        print(f"[*] Genereaza audio cu gTTS... limbă: {final_target_lang}")
+
         try:
-            tts = gTTS(text=translated_text, lang=detected_ai_lang, slow=False)
+            # Folosim limba finală decisă de AI
+            tts = gTTS(text=translated_text, lang=final_target_lang)
             tts.save(output_mp3)
-            print(f"[✓] Audio generat: {output_mp3}")
-            
-            # --- ADAUGĂRI PENTRU STABILITATE AUDIO ---
+        
             import time
-            # Așteptăm până când fișierul este scris complet pe disc (max 1 secundă)
             attempts = 0
             while not os.path.exists(output_mp3) and attempts < 10:
                 time.sleep(0.1)
                 attempts += 1
-            print(f"[✓] Audio salvat pe disc după {attempts} tentative")
-            # ------------------------------------------
+            print(f"[✓] Audio salvat pe disc")
 
         except Exception as tts_err:
-            print(f"[⚠] Limbă nesuportată de gTTS ({detected_ai_lang}), fallback pe EN: {tts_err}")
-            tts = gTTS(text=translated_text, lang='en', slow=False)
+            print(f"[⚠] Eroare TTS pe limba {final_target_lang}, fallback pe en: {tts_err}")
+            tts = gTTS(text=translated_text, lang='en')
             tts.save(output_mp3)
+
 
         if os.path.exists(input_audio): os.remove(input_audio)
         
@@ -557,9 +546,11 @@ async def process_audio(request: Request, audio: UploadFile = File(...), target_
             base_url = base_url.replace("http://", "https://")
 
         # Returnăm datele cu limba în care s-a tradus (din AI result)
+        # --- PREGĂTIRE RĂSPUNS FINAL ---
+        # Folosim base_url pregătit anterior pentru HTTPS/HuggingFace
         response_data = {
-            "source_lang": detected_lang,
-            "target_lang": detected_ai_lang, 
+            "source_lang": source_lang,
+            "target_lang": final_target_lang,
             "original_text": original_text,
             "translated_text": translated_text,
             "audio_url": f"{base_url}/get_audio/{output_mp3}",
@@ -567,7 +558,25 @@ async def process_audio(request: Request, audio: UploadFile = File(...), target_
         }
 
         print(f"[✓] Response gata: {response_data}")
+
+        # --- SALVARE UNICĂ ÎN DB (Dacă userul e logat) ---
+        if user:
+            print(f"[*] Utilizator logat detectat ({user['username']}). Salvez în DB.")
+            history_item = {
+                "session_id": unique_id,
+                "client_entry_id": str(uuid.uuid4()),
+                "source_lang": str(source_lang or "auto").lower(),
+                "target_lang": str(final_target_lang or "en").lower(),
+                "original_text": original_text,
+                "translated_text": translated_text
+            }
+            try:
+                save_history_entries(user["id"], [history_item])
+            except Exception as db_err:
+                print(f"[⚠] Eroare salvare istoric: {db_err}")
+
         return response_data
+
     except Exception as e:
         print(f"[✗] EROARE procesare: {type(e).__name__} - {str(e)}")
         import traceback
@@ -623,6 +632,10 @@ async def get_audio(file_name: str, background_tasks: BackgroundTasks):
         return {"error": "Fișierul nu a fost găsit"}
 
 if __name__ == "__main__":
-    init_db()
     print("[*] Serverul pornește pe http://127.0.0.1:7860")
     uvicorn.run(app, host="127.0.0.1", port=7860)
+
+
+    #microfon mut
+    #ascendent descendent
+    #traducerea live cu limba corecta

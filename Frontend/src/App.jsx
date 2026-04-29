@@ -4,6 +4,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:7860';
 
 function App() {
   const [isListening, setIsListening] = useState(false)
+  const [isFinalizing, setIsFinalizing] = useState(false) // <-- ADAUGĂ ACEASTĂ LINIE
   const [status, setStatus] = useState('Status: Oprit. Apasă butonul pentru a începe.')
   const [logs, setLogs] = useState([])
   const [showHistoryPage, setShowHistoryPage] = useState(false)
@@ -25,6 +26,7 @@ function App() {
   const [liveTranscript, setLiveTranscript] = useState('')
   const [liveTranslation, setLiveTranslation] = useState('')
   const [liveSourceLang, setLiveSourceLang] = useState('AUTO')
+  const [liveTargetLang, setLiveTargetLang] = useState('EN')
   const [showLive, setShowLive] = useState(false)
   const [targetLang] = useState('en')
 
@@ -250,45 +252,52 @@ function App() {
 
   const startRecorderCapture = () => {
     if (!mediaStream.current || isCapturing.current) return
-
     pcmChunks.current = []
     isCapturing.current = true
     setShowLive(true)
     setLiveTranscript('')
     setLiveTranslation('')
-    setLiveSourceLang('AUTO')
+    setLiveSourceLang('AUTO')    // Resetăm la pornire
+    setLiveTargetLang('...')     // Resetăm la pornire
     setStatus('Status: Te ascult... Vorbește acum.')
     startRecognition()
     startSpeechMonitor()
   }
 
-  const sendToBackend = async (blob) => {
+const sendToBackend = async (blob) => {
+    if (isFinalizing) return; // Prevenim trimiteri multiple
+    setIsFinalizing(true); // Acum va funcționa pentru că am adăugat state-ul mai sus
+
     const formData = new FormData()
     formData.append('audio', blob, 'audio.wav')
 
     try {
+      setStatus('Status: Traducere în curs...')
       const response = await fetch(`${API_BASE_URL}/process?target_lang=${targetLang}`, {
         method: 'POST',
         headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
         body: formData,
       })
+
       const data = await response.json()
 
       if (data.status !== 'success') {
-        setStatus('Status: Eroare traducere')
+        setStatus('Status: Eroare la procesare')
         return
       }
 
       const sLang = (data.source_lang || 'AUTO').toUpperCase()
-      const tLang = (data.target_lang || targetLang || 'EN').toUpperCase()
+      const tLang = (data.target_lang || 'EN').toUpperCase()
+
       setLiveTranscript(data.original_text || '')
       setLiveSourceLang(sLang)
+      setLiveTargetLang(tLang)
       setLiveTranslation(data.translated_text || '')
       setShowLive(true)
 
       const entry = {
         id: Date.now() + Math.random(),
-        client_entry_id: generateClientEntryId(),
+        client_entry_id: typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : Math.random().toString(36),
         session_id: sessionIdRef.current,
         source_lang: sLang,
         target_lang: tLang,
@@ -296,32 +305,32 @@ function App() {
         translated_text: data.translated_text || '',
         audio_url: data.audio_url || null,
       }
+      
       setLogs((prev) => [entry, ...prev])
-      persistHistoryEntries([entry], authToken)
+      if (authToken) persistHistoryEntries([entry], authToken)
 
-      if (!data.audio_url) return
-
+      if (data.audio_url) {
+        setStatus('Status: Redau traducerea...')
         const res = await fetch(data.audio_url)
-        if (!res.ok) throw new Error('Audio not found')
         const ttsBlob = await res.blob()
         const url = URL.createObjectURL(ttsBlob)
         const audio = new Audio(url)
 
-        setStatus('Status: Redau traducerea...')
-        await new Promise((resolve, reject) => {
-          audio.play().catch(reject)
+        await new Promise((resolve) => {
+          audio.play().catch(console.error)
           audio.onended = () => {
             URL.revokeObjectURL(url)
             resolve()
           }
-          audio.onerror = () => {
-            URL.revokeObjectURL(url)
-            reject(new Error('Eroare redare audio'))
-          }
         })
+      }
+
     } catch (e) {
       console.error('Eroare comunicare server:', e)
       setStatus('Status: Eroare server')
+    } finally {
+      setIsFinalizing(false) // Deblocăm procesarea
+      setStatus('Status: Te ascult...')
     }
   }
 
@@ -666,7 +675,7 @@ function App() {
                     {historyFoldersOpen[day] && entries.map((entry) => (
                       <div key={entry.client_entry_id} className="entry">
                         <div className="lang-tag">{entry.source_lang} ➔ {entry.target_lang}</div>
-                        <div className="original"><strong>Original:</strong> {entry.original_text}</div>
+                        <div className="original"><strong>{entry.source_lang}:</strong> {entry.original_text}</div>
                         <div className="translated"><strong>{entry.target_lang}:</strong> {entry.translated_text}</div>
                         <div className="history-date">{new Date(entry.created_at).toLocaleString('ro-RO')}</div>
                       </div>
@@ -680,11 +689,13 @@ function App() {
           <div className="live-data">
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <p className="text-sm text-sky-300">Transcript live ({liveSourceLang || 'AUTO'}):</p>
+                {/* Am schimbat aici să folosească liveSourceLang */}
+                <p className="text-sm text-sky-300">Transcript live ({liveSourceLang}):</p>
                 <p className="text-slate-100">{liveTranscript || '⏳ Așteaptă să vorbești...'}</p>
               </div>
               <div>
-                <p className="text-sm text-emerald-300">Traducere live ({targetLang.toUpperCase()}):</p>
+                {/* Am schimbat aici să folosească liveTargetLang în loc de targetLang cel fix */}
+                <p className="text-sm text-emerald-300">Traducere live ({liveTargetLang}):</p>
                 <p className="text-emerald-200">{liveTranslation || '⏳ Se traduce...'}</p>
               </div>
             </div>
