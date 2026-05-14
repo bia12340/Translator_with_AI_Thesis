@@ -75,17 +75,72 @@ def get_user_from_token(token: str):
 
 # ─── AI translation ───────────────────────────────────────────────────────────
 def build_lang_instruction(native_lang: str, country_lang: str, default_target_lang: str) -> str:
-    nl = (native_lang or "").strip().lower()
+    """
+    Build the target-language decision rule injected into the AI system prompt.
+
+    Rules (applied only when the user does NOT explicitly name a target language):
+
+    CASE A — both native & country known, same language (e.g. nl=ro, cl=ro):
+      • source == that language  →  translate to English
+      • source != that language  →  translate to that language
+
+    CASE B — both known, different (e.g. nl=ro, cl=de):
+      • source == nl  →  translate to cl
+      • source == cl  →  translate to nl
+      • source is neither  →  translate to cl (user is in that country)
+
+    CASE C — only native known:
+      • source == nl  →  translate to English
+      • source != nl  →  translate to nl
+
+    CASE D — only country known:
+      • source == cl  →  translate to English
+      • source != cl  →  translate to cl
+
+    CASE E — neither known:
+      • source == English  →  translate to Spanish (globally understood)
+      • source != English  →  translate to English
+    """
+    nl = (native_lang  or "").strip().lower()
     cl = (country_lang or "").strip().lower()
-    if nl and cl and nl != cl:
+
+    if nl and cl:
+        if nl == cl:
+            return (
+                f'REGULI LIMBĂ (nativă="{nl}", țară="{cl}", aceeași limbă):\n'
+                f'- Dacă limba sursă DETECTATĂ este "{nl}", traduce în "en" (engleză).\n'
+                f'- Dacă limba sursă DETECTATĂ NU este "{nl}", traduce în "{nl}".\n'
+                f'- NICIODATĂ nu traduce în aceeași limbă ca sursa.'
+            )
+        else:
+            return (
+                f'REGULI LIMBĂ (nativă="{nl}", țară="{cl}", limbi diferite):\n'
+                f'- Dacă limba sursă DETECTATĂ este "{nl}", traduce în "{cl}".\n'
+                f'- Dacă limba sursă DETECTATĂ este "{cl}", traduce în "{nl}".\n'
+                f'- Dacă sursa nu este nici "{nl}" nici "{cl}", traduce în "{cl}".\n'
+                f'- NICIODATĂ nu traduce în aceeași limbă ca sursa.'
+            )
+    elif nl:
         return (
-            f'BILINGUAL MODE: The user speaks both "{nl}" and "{cl}".\n'
-            f'- If the detected source language is "{nl}", translate to "{cl}".\n'
-            f'- If the detected source language is "{cl}", translate to "{nl}".\n'
-            f'- If neither matches, translate to "{cl}".'
+            f'REGULI LIMBĂ (nativă="{nl}", țară necunoscută):\n'
+            f'- Dacă limba sursă DETECTATĂ este "{nl}", traduce în "en" (engleză).\n'
+            f'- Dacă limba sursă DETECTATĂ NU este "{nl}", traduce în "{nl}".\n'
+            f'- NICIODATĂ nu traduce în aceeași limbă ca sursa.'
         )
-    target = nl or cl or default_target_lang or "en"
-    return f'If the target language is not explicitly stated, translate to "{target}".'
+    elif cl:
+        return (
+            f'REGULI LIMBĂ (țară="{cl}", nativă necunoscută):\n'
+            f'- Dacă limba sursă DETECTATĂ este "{cl}", traduce în "en" (engleză).\n'
+            f'- Dacă limba sursă DETECTATĂ NU este "{cl}", traduce în "{cl}".\n'
+            f'- NICIODATĂ nu traduce în aceeași limbă ca sursa.'
+        )
+    else:
+        return (
+            'REGULI LIMBĂ (nicio preferință setată):\n'
+            '- Dacă limba sursă DETECTATĂ este "en" (engleză), traduce în "es" (spaniolă).\n'
+            '- Dacă limba sursă DETECTATĂ NU este "en", traduce în "en" (engleză).\n'
+            '- NICIODATĂ nu traduce în aceeași limbă ca sursa.'
+        )
 
 
 def ai_agent_process(text, user="default", use_memory=True, default_target_lang="en",
@@ -114,6 +169,7 @@ REGULI STRICTE:
 - NU TRADUCE COMANDA, traduce DOAR TEXTUL.
 - NU ADĂUGA explicații sau alt text.
 - Răspunsul trebuie să fie STRICT JSON valid.
+- NICIODATĂ nu returna aceeași limbă ca sursă și ca țintă. Dacă sursa și ținta ar fi identice, folosește "en" ca limbă țintă.
 - {lang_instruction}
 """
             }
@@ -364,15 +420,56 @@ async def ai_translate(payload: dict, authorization: str = Header(default="")):
 
     return result
 
+@app.patch("/history/{client_entry_id}")
+async def update_history_entry(client_entry_id: str, payload: dict, authorization: str = Header(None)):
+    """Update an existing history entry after the user edits the original text."""
+    token = (authorization or "").replace("Bearer ", "").strip()
+    if not token:
+        return {"status": "error", "message": "Unauthorized"}
+    user = get_user_from_token(token)
+    if not user:
+        return {"status": "error", "message": "Invalid token"}
+    updates = {}
+    for field in ("original_text", "translated_text", "source_lang", "target_lang"):
+        if field in payload:
+            val = payload[field]
+            updates[field] = val.lower() if field in ("source_lang", "target_lang") else val
+    updates["edited"] = True  # always mark as edited when this endpoint is called
+    if not updates:
+        return {"status": "error", "message": "No fields to update"}
+    try:
+        db = _authed_client(token)
+        db.table("translation_history_v2") \
+            .update(updates) \
+            .eq("client_entry_id", client_entry_id) \
+            .eq("user_id", user["id"]) \
+            .execute()
+        print(f"[DB] ✓ Entry {client_entry_id[:8]}… updated")
+        return {"status": "success"}
+    except Exception as e:
+        print(f"[DB] ✗ Update failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 @app.post("/translate_text")
 async def translate_text(payload: dict):
-    text        = payload.get("text", "").strip()
-    target_lang = payload.get("target_lang", "en")
-    user_key    = payload.get("user", "live_user")
+    text         = payload.get("text", "").strip()
+    target_lang  = payload.get("target_lang", "en")
+    native_lang  = payload.get("native_lang", "")
+    country_lang = payload.get("country_lang", "")
+    user_key     = payload.get("user", "live_user")
+    no_memory    = payload.get("no_memory", False)
     if not text:
         return {"status": "failed", "error": "text gol"}
-    result = ai_agent_process(f"Tradu asta în {target_lang}: {text}", user=user_key, default_target_lang=target_lang)
-    return {"status": "success", "translated_text": result.get("text", text), "lang": result.get("target_lang", target_lang)}
+    result = ai_agent_process(text, user=user_key, use_memory=not no_memory,
+                              default_target_lang=target_lang,
+                              native_lang=native_lang, country_lang=country_lang)
+    return {
+        "status":         "success",
+        "translated_text": result.get("text", text),
+        "source_lang":     result.get("source_lang", "auto"),
+        "lang":            result.get("target_lang", target_lang),
+    }
 
 # ─── Audio processing endpoint ────────────────────────────────────────────────
 @app.post("/process")
@@ -433,7 +530,9 @@ async def process_audio(
         print(f"[*] AI Result: {ai_result}")
 
         translated_text   = ai_result.get("text", original_text)
-        source_lang       = ai_result.get("source_lang") or getattr(transcription, "language", "auto")
+        # Whisper's language detection is more reliable than AI's source_lang guess
+        whisper_lang      = getattr(transcription, "language", None)
+        source_lang       = whisper_lang or ai_result.get("source_lang") or "auto"
         final_target_lang = ai_result.get("target_lang") or ai_result.get("lang") or target_lang
 
         try:

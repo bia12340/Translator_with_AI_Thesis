@@ -4,7 +4,7 @@ import {
   Sun, Moon, User, Copy, Volume2, VolumeX, Mic,
   LogOut, Settings, ChevronRight, ChevronDown, Pencil,
   Clock, Globe, MapPin, Languages, History, LogIn,
-  UserPlus, Camera, Eye, EyeOff,
+  UserPlus, Camera, Eye, EyeOff, FileText, Keyboard,
 } from 'lucide-react'
 import './App.css'
 
@@ -31,7 +31,7 @@ function useMute() {
     _setMuted(next)
   }, [])
   const toggle = useCallback(() => setMuted(m => !m), [setMuted])
-  return [muted, mutedRef, toggle]
+  return [muted, mutedRef, toggle, setMuted]
 }
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
@@ -115,9 +115,17 @@ const playAudioUrl = (url) => new Promise(resolve => {
 })
 
 // ─── TranslationCard ──────────────────────────────────────────────────────────
-function TranslationCard({ entry, muted }) {
-  const [copied,  setCopied]  = useState(false)
-  const [playing, setPlaying] = useState(false)
+function TranslationCard({ entry, muted, onRetranslate, onSaveEdit }) {
+  const [copied,    setCopied]    = useState(false)
+  const [playing,   setPlaying]   = useState(false)
+  const [editing,   setEditing]   = useState(false)
+  const [editValue, setEditValue] = useState((entry.original_text || '').trim())
+  const [isEdited,  setIsEdited]  = useState(entry.edited || false)
+  const [displayOrig,       setDisplayOrig]       = useState((entry.original_text  || '').trim())
+  const [displayTrans,      setDisplayTrans]      = useState((entry.translated_text || '').trim())
+  const [displaySourceLang, setDisplaySourceLang] = useState(entry.source_lang || 'AUTO')
+  const [displayTargetLang, setDisplayTargetLang] = useState(entry.target_lang || 'EN')
+  const [retranslating,     setRetranslating]     = useState(false)
 
   const handleCopy = () => {
     navigator.clipboard?.writeText(entry.translated_text).catch(() => {})
@@ -127,47 +135,119 @@ function TranslationCard({ entry, muted }) {
 
   const handlePlay = async () => {
     if (muted) return
-    const text = (entry.translated_text || '').trim()
+    const text = displayTrans
     if (!text) return
     setPlaying(true)
     try {
-      if (entry.audio_url) {
+      if (entry.audio_url && !isEdited) {
         await playAudioUrl(entry.audio_url)
       } else {
-        // Request fresh TTS from backend for history entries
         const r = await fetch(`${API_BASE_URL}/tts`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, lang: (entry.target_lang || 'en').toLowerCase() }),
+          body: JSON.stringify({ text, lang: displayTargetLang.toLowerCase() }),
         })
         const d = await r.json()
         if (d.audio_url) await playAudioUrl(d.audio_url)
-        else speakText(text, entry.target_lang)
+        else speakText(text, displayTargetLang)
       }
     } catch {
-      speakText(text, entry.target_lang)
+      speakText(text, displayTargetLang)
     }
     setPlaying(false)
   }
 
-  const origText  = (entry.original_text  || '').trim()
-  const transText = (entry.translated_text || '').trim()
+  const handleEditSave = async () => {
+    const trimmed = editValue.trim()
+    setEditing(false)
+    if (!trimmed || trimmed === displayOrig) return
+    setDisplayOrig(trimmed)
+    setIsEdited(true)
+
+    // Build updates object — will be enriched after re-translation
+    const updates = {
+      original_text:   trimmed,
+      translated_text: displayTrans,
+      source_lang:     displaySourceLang.toLowerCase(),
+      target_lang:     displayTargetLang.toLowerCase(),
+    }
+
+    if (onRetranslate) {
+      setRetranslating(true)
+      try {
+        const result = await onRetranslate(trimmed)
+        if (result?.translated_text) {
+          updates.translated_text = result.translated_text
+          setDisplayTrans(result.translated_text)
+          if (result.lang) {
+            updates.target_lang = result.lang.toLowerCase()
+            setDisplayTargetLang(result.lang.toUpperCase())
+          }
+          if (result.source_lang && result.source_lang !== 'auto') {
+            updates.source_lang = result.source_lang.toLowerCase()
+            setDisplaySourceLang(result.source_lang.toUpperCase())
+          }
+        }
+      } catch {}
+      finally {
+        setRetranslating(false)
+        onSaveEdit?.(entry.client_entry_id, updates)
+      }
+    } else {
+      onSaveEdit?.(entry.client_entry_id, updates)
+    }
+  }
+
+  const handleEditCancel = () => {
+    setEditValue(displayOrig)
+    setEditing(false)
+  }
+
+  const origText  = displayOrig
+  const transText = displayTrans
   const hasText   = origText || transText
 
   return (
     <div className="tcard">
       <div className="tcard-original">
         <div className="tcard-badges">
-          <span className="badge badge-auto">{(entry.source_lang || 'AUTO').toUpperCase()}</span>
+          <span className="badge badge-auto">{displaySourceLang.toUpperCase()}</span>
           <span className="badge-label">ORIGINAL</span>
+          {isEdited && <span className="tcard-edited-badge">Edited</span>}
+          <div style={{flex:1}}/>
+          {!editing && (
+            <button className="tcard-edit-btn" onClick={() => setEditing(true)} title="Edit original text">
+              <IconEdit size={12}/>
+            </button>
+          )}
         </div>
-        <p className="tcard-text">
-          {origText || <span style={{opacity:.35,fontStyle:'italic'}}>—</span>}
-        </p>
+        {editing ? (
+          <div className="tcard-edit-wrap">
+            <textarea
+              className="tcard-edit-input"
+              value={editValue}
+              onChange={e => setEditValue(e.target.value)}
+              autoFocus
+              rows={2}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleEditSave() }
+                if (e.key === 'Escape') handleEditCancel()
+              }}
+            />
+            <div className="tcard-edit-actions">
+              <button className="tcard-edit-save" onClick={handleEditSave}>Save</button>
+              <button className="tcard-edit-cancel" onClick={handleEditCancel}>Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <p className="tcard-text">
+            {origText || <span style={{opacity:.35,fontStyle:'italic'}}>—</span>}
+          </p>
+        )}
       </div>
       <div className="tcard-translation">
         <div className="tcard-badges">
-          <span className="badge badge-lang">{(entry.target_lang || 'EN').toUpperCase()}</span>
+          <span className="badge badge-lang">{displayTargetLang.toUpperCase()}</span>
           <span className="badge-label">TRANSLATION</span>
           {entry.created_at && (
             <span className="tcard-time">
@@ -180,11 +260,13 @@ function TranslationCard({ entry, muted }) {
           )}
         </div>
         <p className="tcard-text tcard-text--translated">
-          {transText || <span style={{opacity:.35,fontStyle:'italic'}}>—</span>}
+          {retranslating
+            ? <span style={{opacity:.45,fontStyle:'italic'}}>Translating…</span>
+            : transText || <span style={{opacity:.35,fontStyle:'italic'}}>—</span>}
         </p>
         <div className="tcard-actions">
           <button className="icon-btn" onClick={handleCopy} title="Copy"
-            disabled={!hasText} style={!hasText ? {opacity:.3} : {}}>
+            disabled={!hasText || retranslating} style={(!hasText || retranslating) ? {opacity:.3} : {}}>
             {copied
               ? <span style={{fontSize:'11px',fontWeight:700,color:'var(--color-success)'}}>✓</span>
               : <IconCopy />}
@@ -192,8 +274,8 @@ function TranslationCard({ entry, muted }) {
           <button
             className={`icon-btn ${muted || !transText ? 'icon-btn--muted' : ''} ${playing ? 'icon-btn--active' : ''}`}
             onClick={handlePlay}
-            disabled={!transText}
-            title={muted ? 'TTS silențios — schimbă din Setări' : !transText ? 'Nicio traducere disponibilă' : 'Redă traducerea'}
+            disabled={!transText || playing || retranslating}
+            title={playing ? 'Playing…' : retranslating ? 'Translating…' : muted ? 'TTS muted — change in Settings' : !transText ? 'No translation available' : 'Play translation'}
           >
             {muted ? <IconMute /> : <IconVolume />}
           </button>
@@ -210,7 +292,7 @@ function detectCountryFromLocale() {
   return parts.length >= 2 ? parts[parts.length - 1].toUpperCase() : ''
 }
 
-function ProfilePage({ authUser, authToken, onBack, onGoHistory, onUserUpdate, onAvatarChange }) {
+function ProfilePage({ authUser, authToken, onBack, onGoHistory, onUserUpdate, onAvatarChange, onModeChange }) {
   const [editing,  setEditing]  = useState(null)
   const [mainLang, setMainLang] = useState(
     authUser?.main_language || localStorage.getItem('translator_main_lang') || ''
@@ -218,13 +300,39 @@ function ProfilePage({ authUser, authToken, onBack, onGoHistory, onUserUpdate, o
   const [country,  setCountry]  = useState(
     authUser?.country ||
     localStorage.getItem(`user_country_${authUser?.id}`) ||
-    detectCountryFromLocale()
+    ''
   )
   // Timezone is auto-detected — never editable, never sent to backend
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
-  const [saving,   setSaving]   = useState(false)
-  const [error,    setError]    = useState('')
+  const [saving,      setSaving]      = useState(false)
+  const [error,       setError]       = useState('')
+  const [prefMode,    setPrefMode]    = useState(authUser?.preferred_mode || localStorage.getItem('translation_mode') || 'speech-speech')
+  const [editingMode, setEditingMode] = useState(false)
   const [avatarUrl, setAvatarUrl] = useState(null)
+
+  const PROFILE_MODES = [
+    { id: 'speech-speech', label: 'Speech to Speech', sub: 'Speak & hear',
+      icon: <><Mic size={18}/><span style={{opacity:.45,fontSize:'11px',margin:'0 2px'}}>→</span><Volume2 size={18}/></> },
+    { id: 'speech-text',   label: 'Speech to Text',   sub: 'Speak & read',
+      icon: <><Mic size={18}/><span style={{opacity:.45,fontSize:'11px',margin:'0 2px'}}>→</span><FileText size={18}/></> },
+    { id: 'text-text',     label: 'Text to Text',     sub: 'Type & read',
+      icon: <><Keyboard size={18}/><span style={{opacity:.45,fontSize:'11px',margin:'0 2px'}}>→</span><FileText size={18}/></> },
+    { id: 'text-speech',   label: 'Text to Speech',   sub: 'Type & hear',
+      icon: <><Keyboard size={18}/><span style={{opacity:.45,fontSize:'11px',margin:'0 2px'}}>→</span><Volume2 size={18}/></> },
+  ]
+  const MODE_LABEL = { 'speech-speech':'Speech to Speech', 'speech-text':'Speech to Text', 'text-text':'Text to Text', 'text-speech':'Text to Speech' }
+
+  const saveMode = async () => {
+    setSaving(true); setError('')
+    try {
+      const { data, error: sbErr } = await supabase.auth.updateUser({ data: { preferred_mode: prefMode } })
+      if (sbErr) { setError(sbErr.message); return }
+      onUserUpdate(data.user)
+      onModeChange?.(prefMode)
+      setEditingMode(false)
+    } catch { setError('Server error') }
+    finally { setSaving(false) }
+  }
   const fileRef = useRef(null)
 
   const memberSince = authUser?.created_at
@@ -377,6 +485,46 @@ function ProfilePage({ authUser, authToken, onBack, onGoHistory, onUserUpdate, o
         {/* Timezone — read-only, auto from device */}
         <EditRow icon={<IconGlobe />} label="Timezone (auto-detected)"
           value={timezone} fieldKey="timezone" readOnly />
+
+        {/* Preferred translation mode */}
+        <div className={`profile-row profile-row--mode ${editingMode ? 'profile-row--mode-open' : ''}`}>
+          <div className="profile-mode-header">
+            <div className="profile-row-left">
+              <span className="profile-row-icon"><IconSettings /></span>
+              <div style={{flex:1,minWidth:0}}>
+                <div className="profile-row-label">Preferred translation mode</div>
+                {!editingMode && (
+                  <div className="profile-row-value">{MODE_LABEL[prefMode] || <span style={{opacity:.4}}>Not set</span>}</div>
+                )}
+              </div>
+            </div>
+            <div className="profile-row-right">
+              {editingMode ? (
+                <>
+                  <button className="profile-save-btn" onClick={saveMode} disabled={saving}>{saving ? '…' : 'Save'}</button>
+                  <button className="profile-cancel-btn" onClick={() => { setEditingMode(false); setPrefMode(authUser?.preferred_mode || localStorage.getItem('translation_mode') || 'speech-speech') }}>Cancel</button>
+                </>
+              ) : (
+                <button className="icon-btn" onClick={() => setEditingMode(true)}><IconEdit /></button>
+              )}
+            </div>
+          </div>
+          {editingMode && (
+            <div className="mode-selector mode-selector--4 profile-mode-grid">
+              {PROFILE_MODES.map(m => (
+                <button key={m.id} type="button"
+                  className={`mode-card ${prefMode === m.id ? 'mode-card--active' : ''}`}
+                  onClick={() => setPrefMode(m.id)}>
+                  <div className="mode-card-icon">{m.icon}</div>
+                  <div className="mode-card-texts">
+                    <div className="mode-card-title">{m.label}</div>
+                    <div className="mode-card-sub">{m.sub}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="profile-card profile-history-link" onClick={onGoHistory}>
@@ -399,9 +547,17 @@ function ProfilePage({ authUser, authToken, onBack, onGoHistory, onUserUpdate, o
 const LS_OPEN  = 'hist_open_days'
 const LS_NAMES = 'hist_day_names'
 
-function HistoryPage({ authToken, muted, onBack }) {
+function HistoryPage({ authToken, muted, onBack, onRetranslate, onSaveEdit }) {
   const [entries,    setEntries]    = useState([])
   const [loading,    setLoading]    = useState(true)
+
+  // Update a card in local history + propagate to DB via parent
+  const handleSaveEditHistory = (clientEntryId, updates) => {
+    setEntries(prev => prev.map(e =>
+      e.client_entry_id === clientEntryId ? { ...e, ...updates, edited: true } : e
+    ))
+    onSaveEdit?.(clientEntryId, updates)
+  }
   const [openDays,   setOpenDays]   = useState(() => {
     try { return JSON.parse(localStorage.getItem(LS_OPEN) || '{}') } catch { return {} }
   })
@@ -514,7 +670,7 @@ function HistoryPage({ authToken, muted, onBack }) {
               {openDays[day] && (
                 <div className="hist-inner-scroll">
                   {dayEntries.map((e, i) => (
-                    <TranslationCard key={e.client_entry_id || i} entry={e} muted={muted} />
+                    <TranslationCard key={e.client_entry_id || i} entry={e} muted={muted} onRetranslate={onRetranslate} onSaveEdit={handleSaveEditHistory} />
                   ))}
                 </div>
               )}
@@ -527,46 +683,72 @@ function HistoryPage({ authToken, muted, onBack }) {
 }
 
 // ─── AuthModal ────────────────────────────────────────────────────────────────
-function AuthModal({ initialMode = 'login', onClose }) {
-  const [mode,       setMode]       = useState(initialMode)
-  const [form,       setForm]       = useState({ username:'', email:'', password:'', main_language:'' })
-  const [msg,        setMsg]        = useState({ text:'', ok: false })
-  const [loading,    setLoading]    = useState(false)
-  const [showPass,   setShowPass]   = useState(false)
+function AuthModal({ initialMode = 'login', onClose, onModeChange }) {
+  const [mode,     setMode]     = useState(initialMode)
+  const [step,     setStep]     = useState(1) // 1 = credentials, 2 = optional profile (signup only)
+  const [form,     setForm]     = useState({ username:'', email:'', password:'', main_language:'', country:'', preferred_mode:'speech-speech' })
+  const [msg,      setMsg]      = useState({ text:'', ok: false })
+  const [loading,  setLoading]  = useState(false)
+  const [showPass, setShowPass] = useState(false)
   const set = (f, v) => setForm(p => ({ ...p, [f]: v }))
 
-  const handleSignup = async () => {
-    setMsg({ text:'', ok:false }); setLoading(true)
+  const SIGNUP_MODES = [
+    { id: 'speech-speech', label: 'Speech to Speech', sub: 'Speak & hear',
+      icon: <><Mic size={20}/><span style={{opacity:.45,fontSize:'12px',margin:'0 2px'}}>→</span><Volume2 size={20}/></> },
+    { id: 'speech-text',   label: 'Speech to Text',   sub: 'Speak & read',
+      icon: <><Mic size={20}/><span style={{opacity:.45,fontSize:'12px',margin:'0 2px'}}>→</span><FileText size={20}/></> },
+    { id: 'text-text',     label: 'Text to Text',     sub: 'Type & read',
+      icon: <><Keyboard size={20}/><span style={{opacity:.45,fontSize:'12px',margin:'0 2px'}}>→</span><FileText size={20}/></> },
+    { id: 'text-speech',   label: 'Text to Speech',   sub: 'Type & hear',
+      icon: <><Keyboard size={20}/><span style={{opacity:.45,fontSize:'12px',margin:'0 2px'}}>→</span><Volume2 size={20}/></> },
+  ]
+
+  // ── Step 1: validate & advance ─────────────────────────────────────────────
+  const handleContinue = () => {
+    setMsg({ text:'', ok:false })
     if (!form.username.trim() || form.username.trim().length < 3) {
-      setMsg({ text:'Username must be at least 3 characters', ok:false }); setLoading(false); return
+      setMsg({ text:'Username must be at least 3 characters', ok:false }); return
     }
     if (!form.email.includes('@')) {
-      setMsg({ text:'Please enter a valid email address (not your username)', ok:false }); setLoading(false); return
+      setMsg({ text:'Please enter a valid email address', ok:false }); return
     }
-    const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-      email:    form.email,
-      password: form.password,
-      options:  { data: { username: form.username.trim(), main_language: form.main_language.trim() || null } },
+    if (!form.password || form.password.length < 6) {
+      setMsg({ text:'Password must be at least 6 characters', ok:false }); return
+    }
+    setStep(2)
+  }
+
+  // ── Step 2: create account (skipOptional skips optional fields) ────────────
+  const handleSignup = async (skipOptional = false) => {
+    setMsg({ text:'', ok:false }); setLoading(true)
+    const meta = {
+      username:       form.username.trim(),
+      main_language:  (!skipOptional && form.main_language.trim()) ? form.main_language.trim() : null,
+      country:        (!skipOptional && form.country.trim())        ? form.country.trim().toUpperCase() : null,
+      preferred_mode: (!skipOptional && form.preferred_mode)        ? form.preferred_mode : null,
+    }
+    const { error: signUpError } = await supabase.auth.signUp({
+      email: form.email, password: form.password,
+      options: { data: meta },
     })
-    if (signUpError) {
-      setLoading(false)
-      setMsg({ text: signUpError.message, ok:false }); return
-    }
-    // Try auto-login immediately (works when email confirmation is disabled)
+    if (signUpError) { setLoading(false); setMsg({ text: signUpError.message, ok:false }); return }
+    // Try auto-login (works when email confirmation is disabled)
     const { error: loginError } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password })
     setLoading(false)
     if (!loginError) {
+      // Apply preferred mode immediately (don't wait for onAuthStateChange timing)
+      if (meta.preferred_mode) onModeChange?.(meta.preferred_mode)
       onClose(); return
     }
-    // Email confirmation is enabled — user needs to confirm first
     if (loginError.message?.toLowerCase().includes('email not confirmed')) {
       setMsg({ text:'Account created! Check your inbox for a confirmation email, then log in.', ok:true })
     } else {
       setMsg({ text:'Account created! You can now log in.', ok:true })
     }
-    setMode('login')
+    setMode('login'); setStep(1)
   }
 
+  // ── Login ──────────────────────────────────────────────────────────────────
   const handleLogin = async () => {
     setMsg({ text:'', ok:false }); setLoading(true)
     if (!form.email.includes('@')) {
@@ -575,10 +757,10 @@ function AuthModal({ initialMode = 'login', onClose }) {
     const { error } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password })
     setLoading(false)
     if (error) {
-      const msg = error.message?.toLowerCase()
-      if (msg?.includes('invalid login credentials') || msg?.includes('invalid credentials')) {
+      const m = error.message?.toLowerCase()
+      if (m?.includes('invalid login credentials') || m?.includes('invalid credentials')) {
         setMsg({ text:'Wrong email or password. Check your details and try again.', ok:false })
-      } else if (msg?.includes('email not confirmed')) {
+      } else if (m?.includes('email not confirmed')) {
         setMsg({ text:'Please confirm your email first — check your inbox.', ok:false })
       } else {
         setMsg({ text: error.message, ok:false })
@@ -588,75 +770,153 @@ function AuthModal({ initialMode = 'login', onClose }) {
     onClose()
   }
 
+  // ── Forgot ─────────────────────────────────────────────────────────────────
   const handleForgot = async () => {
     if (!form.email) { setMsg({ text:'Enter your email first', ok:false }); return }
     setLoading(true)
-    const { error } = await supabase.auth.resetPasswordForEmail(form.email, {
-      redirectTo: window.location.origin,
-    })
+    const { error } = await supabase.auth.resetPasswordForEmail(form.email, { redirectTo: window.location.origin })
     setLoading(false)
     if (error) { setMsg({ text: error.message, ok:false }); return }
     setMsg({ text:'Password reset email sent! Check your inbox.', ok:true })
   }
 
-  const switchMode = (m) => { setMode(m); setMsg({ text:'', ok:false }) }
+  const switchMode = (m) => { setMode(m); setStep(1); setMsg({ text:'', ok:false }) }
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
-        {mode !== 'forgot' && (
+
+        {/* ── Tabs: only show on step 1 / non-signup ── */}
+        {mode !== 'forgot' && !(mode === 'signup' && step === 2) && (
           <div className="modal-tabs">
-            <button className={`modal-tab ${mode==='login'?'active':''}`} onClick={() => switchMode('login')}>Login</button>
+            <button className={`modal-tab ${mode==='login'?'active':''}`}  onClick={() => switchMode('login')}>Login</button>
             <button className={`modal-tab ${mode==='signup'?'active':''}`} onClick={() => switchMode('signup')}>Sign up</button>
           </div>
         )}
 
+        {/* ── Forgot: title ── */}
         {mode === 'forgot' && (
           <h3 className="modal-title" style={{marginBottom:12}}>Reset password</h3>
         )}
 
-        {mode === 'signup' && (
+        {/* ══════════════════════════════════════
+            SIGNUP — Step 1: Credentials
+        ══════════════════════════════════════ */}
+        {mode === 'signup' && step === 1 && (
           <>
-            <input className="field" placeholder="Username (min 3 characters)" value={form.username} onChange={e => set('username', e.target.value)} />
-            <input className="field" placeholder="Native language (e.g. ro, en)" value={form.main_language} onChange={e => set('main_language', e.target.value)} />
+            <div className="signup-step-indicator">
+              <span className="signup-step-dot signup-step-dot--active">1</span>
+              <span className="signup-step-line"/>
+              <span className="signup-step-dot signup-step-dot--pending">2</span>
+            </div>
+            <input className="field" placeholder="Username (min 3 characters)"
+              value={form.username} onChange={e => set('username', e.target.value)} autoFocus />
+            <input className="field" placeholder="Email address (e.g. you@example.com)" type="email"
+              value={form.email} onChange={e => set('email', e.target.value)} />
+            <div className="field-password-wrap">
+              <input className="field" type={showPass ? 'text' : 'password'}
+                placeholder="Password (min 6 characters)" value={form.password}
+                onChange={e => set('password', e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleContinue() }} />
+              <button className="field-eye-btn" type="button" onClick={() => setShowPass(p => !p)}
+                title={showPass ? 'Hide password' : 'Show password'}>
+                {showPass ? <EyeOff size={15}/> : <Eye size={15}/>}
+              </button>
+            </div>
+            {msg.text && <p className={`auth-msg ${msg.ok ? 'auth-success' : 'auth-error'}`}>{msg.text}</p>}
+            <button className="modal-submit" onClick={handleContinue}>Continue →</button>
           </>
         )}
 
-        <input className="field" placeholder="Email address (e.g. you@example.com)" type="email" value={form.email} onChange={e => set('email', e.target.value)} />
+        {/* ══════════════════════════════════════
+            SIGNUP — Step 2: Optional profile
+        ══════════════════════════════════════ */}
+        {mode === 'signup' && step === 2 && (
+          <>
+            <div className="signup-step2-header">
+              <div className="signup-step-indicator">
+                <span className="signup-step-dot signup-step-dot--done">1</span>
+                <span className="signup-step-line"/>
+                <span className="signup-step-dot signup-step-dot--active">2</span>
+              </div>
+              <h3 className="modal-title" style={{marginBottom:4}}>Complete your profile</h3>
+              <p className="signup-step2-sub">All fields are optional — feel free to skip</p>
+            </div>
 
-        {mode !== 'forgot' && (
-          <div className="field-password-wrap">
-            <input className="field" type={showPass ? 'text' : 'password'}
-              placeholder="Password" value={form.password}
-              onChange={e => set('password', e.target.value)} />
-            <button className="field-eye-btn" type="button" onClick={() => setShowPass(p => !p)}
-              title={showPass ? 'Hide password' : 'Show password'}>
-              {showPass ? <EyeOff size={15}/> : <Eye size={15}/>}
+            <input className="field" placeholder="Native language (e.g. Romanian, English, ro, en)"
+              value={form.main_language} onChange={e => set('main_language', e.target.value)} autoFocus />
+            <input className="field" placeholder="Country (e.g. Romania, RO, United States)"
+              value={form.country} onChange={e => set('country', e.target.value)} />
+            <div className="signup-mode-wrap">
+              <div className="signup-mode-label">Preferred translation mode <span>(optional)</span></div>
+              <div className="mode-selector mode-selector--4 signup-mode-grid">
+                {SIGNUP_MODES.map(m => (
+                  <button key={m.id} type="button"
+                    className={`mode-card ${form.preferred_mode === m.id ? 'mode-card--active' : ''}`}
+                    onClick={() => set('preferred_mode', form.preferred_mode === m.id ? '' : m.id)}>
+                    <div className="mode-card-icon">{m.icon}</div>
+                    <div className="mode-card-texts">
+                      <div className="mode-card-title">{m.label}</div>
+                      <div className="mode-card-sub">{m.sub}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {msg.text && <p className={`auth-msg ${msg.ok ? 'auth-success' : 'auth-error'}`}>{msg.text}</p>}
+
+            <div className="signup-step2-actions">
+              <button className="signup-skip-btn" onClick={() => handleSignup(true)} disabled={loading}>
+                Skip
+              </button>
+              <button className="modal-submit signup-create-btn" onClick={() => handleSignup(false)} disabled={loading}>
+                {loading ? 'Creating…' : 'Create account'}
+              </button>
+            </div>
+            <button className="auth-forgot-btn" style={{marginTop:2}}
+              onClick={() => { setStep(1); setMsg({ text:'', ok:false }) }}>
+              ← Back
             </button>
-          </div>
+          </>
         )}
 
-        {mode === 'login' && (
-          <button className="auth-forgot-btn" onClick={() => switchMode('forgot')}>
-            Forgot password?
-          </button>
+        {/* ══════════════════════════════════════
+            LOGIN & FORGOT
+        ══════════════════════════════════════ */}
+        {mode !== 'signup' && (
+          <>
+            <input className="field" placeholder="Email address (e.g. you@example.com)" type="email"
+              value={form.email} onChange={e => set('email', e.target.value)} />
+            {mode !== 'forgot' && (
+              <div className="field-password-wrap">
+                <input className="field" type={showPass ? 'text' : 'password'}
+                  placeholder="Password" value={form.password}
+                  onChange={e => set('password', e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleLogin() }} />
+                <button className="field-eye-btn" type="button" onClick={() => setShowPass(p => !p)}
+                  title={showPass ? 'Hide password' : 'Show password'}>
+                  {showPass ? <EyeOff size={15}/> : <Eye size={15}/>}
+                </button>
+              </div>
+            )}
+            {mode === 'login' && (
+              <button className="auth-forgot-btn" onClick={() => switchMode('forgot')}>Forgot password?</button>
+            )}
+            {msg.text && <p className={`auth-msg ${msg.ok ? 'auth-success' : 'auth-error'}`}>{msg.text}</p>}
+            <button className="modal-submit"
+              onClick={mode === 'forgot' ? handleForgot : handleLogin}
+              disabled={loading}>
+              {loading ? 'Please wait…' : mode === 'forgot' ? 'Send reset email' : 'Login'}
+            </button>
+            {mode === 'forgot' && (
+              <button className="auth-forgot-btn" style={{marginTop:8}} onClick={() => switchMode('login')}>
+                ← Back to login
+              </button>
+            )}
+          </>
         )}
 
-        {msg.text && (
-          <p className={`auth-msg ${msg.ok ? 'auth-success' : 'auth-error'}`}>{msg.text}</p>
-        )}
-
-        <button className="modal-submit"
-          onClick={mode === 'signup' ? handleSignup : mode === 'forgot' ? handleForgot : handleLogin}
-          disabled={loading}>
-          {loading ? 'Please wait…' : mode === 'signup' ? 'Create account' : mode === 'forgot' ? 'Send reset email' : 'Login'}
-        </button>
-
-        {mode === 'forgot' && (
-          <button className="auth-forgot-btn" style={{marginTop:8}} onClick={() => switchMode('login')}>
-            ← Back to login
-          </button>
-        )}
       </div>
     </div>
   )
@@ -713,26 +973,37 @@ function ResetPasswordModal({ onDone }) {
 }
 
 // ─── SettingsModal ────────────────────────────────────────────────────────────
-function SettingsModal({ muted, onToggleMute, onClose }) {
+function SettingsModal({ translationMode, onModeChange, onClose }) {
+  const MODES = [
+    { id: 'speech-speech', label: 'Speech to Speech', sub: 'Speak & hear',
+      icon: <><Mic size={20}/><span style={{opacity:.45,fontSize:'12px',margin:'0 2px'}}>→</span><Volume2 size={20}/></> },
+    { id: 'speech-text',   label: 'Speech to Text',   sub: 'Speak & read',
+      icon: <><Mic size={20}/><span style={{opacity:.45,fontSize:'12px',margin:'0 2px'}}>→</span><FileText size={20}/></> },
+    { id: 'text-text',     label: 'Text to Text',     sub: 'Type & read',
+      icon: <><Keyboard size={20}/><span style={{opacity:.45,fontSize:'12px',margin:'0 2px'}}>→</span><FileText size={20}/></> },
+    { id: 'text-speech',   label: 'Text to Speech',   sub: 'Type & hear',
+      icon: <><Keyboard size={20}/><span style={{opacity:.45,fontSize:'12px',margin:'0 2px'}}>→</span><Volume2 size={20}/></> },
+  ]
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <h3 className="modal-title">Settings</h3>
-        <div className="settings-row">
-          <div className="settings-row-left">
-            <span className="settings-icon">{muted ? <IconMute size={18}/> : <IconVolume size={18}/>}</span>
-            <div>
-              <div className="settings-row-label">Text-to-Speech</div>
-              <div className="settings-row-sub">{muted ? 'Audio output is muted' : 'Audio output is active'}</div>
-            </div>
-          </div>
-          <button className={`mute-toggle ${muted ? 'mute-toggle--muted' : ''}`} onClick={onToggleMute}>
-            {muted
-              ? <><IconMute size={15}/><span>Unmute</span></>
-              : <><IconVolume size={15}/><span>Mute</span></>}
-          </button>
+        <div className="settings-section-label">Translation Mode</div>
+        <p className="settings-section-sub">Choose how you want to translate</p>
+        <div className="mode-selector mode-selector--4">
+          {MODES.map(m => (
+            <button key={m.id}
+              className={`mode-card ${translationMode === m.id ? 'mode-card--active' : ''}`}
+              onClick={() => onModeChange(m.id)}>
+              <div className="mode-card-icon">{m.icon}</div>
+              <div className="mode-card-texts">
+                <div className="mode-card-title">{m.label}</div>
+                <div className="mode-card-sub">{m.sub}</div>
+              </div>
+            </button>
+          ))}
         </div>
-        <button className="modal-submit" onClick={onClose} style={{marginTop:8}}>Done</button>
+        <button className="modal-submit" onClick={onClose} style={{marginTop:12}}>Done</button>
       </div>
     </div>
   )
@@ -763,7 +1034,6 @@ function UserDropdown({ authUser, avatarUrl, onProfile, onSettings, onLogout, on
             <div style={{ fontSize:'11px', opacity:0.55, marginTop:'1px', wordBreak:'break-all', lineHeight:1.4 }}>{authUser.email}</div>
           </div>
         </div>
-        <div className="dropdown-status"><span className="dot"/>Connected</div>
       </div>
       <div className="dropdown-divider"/>
       <button className="dropdown-item" onClick={() => { onProfile(); onClose() }}><IconProfile/> View Profile</button>
@@ -793,7 +1063,7 @@ function GuestDropdown({ onLogin, onSignup, onSettings, onClose }) {
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [theme, toggleTheme]       = useTheme()
-  const [muted, mutedRef, toggleMute] = useMute()
+  const [muted, mutedRef, toggleMute, setMuted] = useMute()
 
   const [authUser,  setAuthUser]  = useState(null)
   const [authToken, _setAuthToken] = useState('')
@@ -809,27 +1079,57 @@ export default function App() {
 
   // Normalize Supabase user → shape the rest of the app expects
   const normalizeUser = (u) => u ? {
-    id:            u.id,
-    email:         u.email,
-    username:      u.user_metadata?.username || u.email?.split('@')[0] || 'User',
-    main_language: u.user_metadata?.main_language || '',
+    id:             u.id,
+    email:          u.email,
+    username:       u.user_metadata?.username || u.email?.split('@')[0] || 'User',
+    main_language:  u.user_metadata?.main_language || '',
+    country:        u.user_metadata?.country || null,
+    preferred_mode: u.user_metadata?.preferred_mode || null,
+    created_at:     u.created_at || null,
   } : null
 
   // Language context — derived from user profile + localStorage
   const nativeLang = authUser?.main_language || localStorage.getItem('translator_main_lang') || ''
-  const storedCountry = (authUser?.id
-    ? (localStorage.getItem(`user_country_${authUser.id}`) || detectCountryFromLocale())
-    : detectCountryFromLocale()
+  const storedCountry = (
+    authUser?.id ? (localStorage.getItem(`user_country_${authUser.id}`) || '') : ''
   ).toUpperCase()
   const countryLang = countryToLang(storedCountry)
   // Default target: native lang if set, else country lang, else 'en'
   const targetLang = nativeLang || countryLang || 'en'
 
-  // Translator state — no live preview
+  // Translation mode — persisted (4 modes: speech-speech, speech-text, text-text, text-speech)
+  const [translationMode, setTranslationMode] = useState(() => {
+    const m = localStorage.getItem('translation_mode') || 'speech-speech'
+    if (m === 'speech') return 'speech-speech' // migrate old value
+    if (m === 'text')   return 'text-text'      // migrate old value
+    return m
+  })
+  const isSpeechInput = translationMode.startsWith('speech')
+  const isSpeechOutput = translationMode.endsWith('speech')
+
+  const changeMode = (m) => {
+    setTranslationMode(m)
+    localStorage.setItem('translation_mode', m)
+    setMuted(!m.endsWith('speech'))
+    // Stop microphone if switching to a text-input mode
+    if (!m.startsWith('speech') && isListening) stopListening()
+    // Persist preference to Supabase profile (fire-and-forget)
+    if (authUser) supabase.auth.updateUser({ data: { preferred_mode: m } }).catch(() => {})
+  }
+
+  // Sync muted with mode on mount
+  useEffect(() => { setMuted(!translationMode.endsWith('speech')) }, []) // eslint-disable-line
+
+  // Translator state
   const [isListening,  setIsListening]  = useState(false)
   const [isFinalizing, setIsFinalizing] = useState(false)
+  const [isVoiceActive, setIsVoiceActive] = useState(false)
+  const isVoiceActiveRef = useRef(false)
+  const setVoiceActive = (v) => { isVoiceActiveRef.current = v; setIsVoiceActive(v) }
   const [status,       setStatus]       = useState('Press the button to start.')
   const [logs,         setLogs]         = useState([])
+  const [textInput,    setTextInput]    = useState('')
+  const [textLoading,  setTextLoading]  = useState(false)
 
   // Refs (audio pipeline)
   const mediaStream        = useRef(null)
@@ -898,6 +1198,31 @@ export default function App() {
   const openLogin  = () => { setAuthInitMode('login');  setShowAuth(true) }
   const openSignup = () => { setAuthInitMode('signup'); setShowAuth(true) }
 
+  // Persist an edited card — update logs state + PATCH DB
+  const handleSaveEdit = (clientEntryId, updates) => {
+    setLogs(prev => prev.map(e =>
+      e.client_entry_id === clientEntryId ? { ...e, ...updates, edited: true } : e
+    ))
+    if (authTokenRef.current && clientEntryId) {
+      fetch(`${API_BASE_URL}/history/${encodeURIComponent(clientEntryId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authTokenRef.current}` },
+        body: JSON.stringify(updates),
+      }).catch(e => console.warn('[edit] DB update failed:', e))
+    }
+  }
+
+  // Re-translate edited original text (used by TranslationCard after user edits)
+  const handleRetranslate = async (text) => {
+    const r = await fetch(`${API_BASE_URL}/translate_text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // no_memory: true → no chat history bleed-through between independent edits
+      body: JSON.stringify({ text, target_lang: targetLang, native_lang: nativeLang, country_lang: countryLang, no_memory: true }),
+    })
+    return await r.json()
+  }
+
   // Supabase auth state — handles login, logout, token refresh, and password recovery
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
@@ -910,6 +1235,16 @@ export default function App() {
         setAuthToken(session.access_token)
         setAuthUser(user)
         if (user?.main_language) localStorage.setItem('translator_main_lang', user.main_language)
+        // Restore country saved during signup
+        if (user?.country && user?.id) {
+          localStorage.setItem(`user_country_${user.id}`, user.country)
+        }
+        // Apply saved translation mode preference from profile
+        if (user?.preferred_mode) {
+          setTranslationMode(user.preferred_mode)
+          localStorage.setItem('translation_mode', user.preferred_mode)
+          setMuted(!user.preferred_mode.endsWith('speech'))
+        }
         // Upload anything captured while logged out
         if (event === 'SIGNED_IN') {
           await persistHistoryEntries(logs, session.access_token)
@@ -946,7 +1281,7 @@ export default function App() {
   const hasHumanVoice = chunks => {
     let s=0, c=0
     for (const ch of chunks) for (const v of ch) { s += v*v; c++ }
-    return c > 0 && Math.sqrt(s/c) > 0.01
+    return c > 0 && Math.sqrt(s/c) > 0.02
   }
 
   const encodeWav = (chunks, sr) => {
@@ -976,10 +1311,13 @@ export default function App() {
     speechMonitorTimer.current = setInterval(() => {
       if (!isCapturing.current) return
       an.getFloatTimeDomainData(d); let sq=0; for (const v of d) sq += v*v
-      if (Math.sqrt(sq/d.length) > 0.01) lastSpeechAt.current = Date.now()
+      if (Math.sqrt(sq/d.length) > 0.02) {
+        lastSpeechAt.current = Date.now()
+        if (!isVoiceActiveRef.current) setVoiceActive(true)
+      }
       const silence   = Date.now() - lastSpeechAt.current
       const recorded  = Date.now() - recorderStartedAt.current
-      if (recorded > 1200 && silence >= 3000) stopCurrentCaptureAndProcess()
+      if (recorded > 1000 && silence >= 2000) stopCurrentCaptureAndProcess()
     }, 150)
   }
 
@@ -1004,6 +1342,7 @@ export default function App() {
   const startRecorderCapture = () => {
     if (!mediaStream.current || isCapturing.current) return
     pcmChunks.current = []; isCapturing.current = true
+    setVoiceActive(false)
     setStatus('Te ascult… Vorbește acum.')
     startSpeechMonitor()
   }
@@ -1046,9 +1385,53 @@ export default function App() {
         await playAudioUrl(data.audio_url)
       }
     } catch(e) { console.error(e); setStatus('Eroare server') }
-    finally { setIsFinalizing(false); if (keepListening.current) setStatus('Te ascult…') }
+    finally { setIsFinalizing(false); setVoiceActive(false); if (keepListening.current) setStatus('Te ascult…') }
   }
 
+
+  const handleTextTranslate = async () => {
+    const text = textInput.trim()
+    if (!text || textLoading) return
+    setTextLoading(true); setStatus('Translating…')
+    try {
+      const r = await fetch(`${API_BASE_URL}/translate_text`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, target_lang: targetLang, native_lang: nativeLang, country_lang: countryLang, user: 'text_user' }),
+      })
+      const d = await r.json()
+      if (d.translated_text) {
+        const entry = {
+          id: Date.now() + Math.random(),
+          client_entry_id: generateCEI(),
+          session_id: sessionIdRef.current,
+          source_lang: (d.source_lang && d.source_lang !== 'auto' ? d.source_lang : 'AUTO').toUpperCase(),
+          target_lang: (d.lang || targetLang || 'en').toUpperCase(),
+          original_text: text,
+          translated_text: d.translated_text,
+          audio_url: null,
+          created_at: new Date().toISOString(),
+        }
+        setLogs(prev => [entry, ...prev])
+        if (authTokenRef.current) persistHistoryEntries([entry], authTokenRef.current)
+        setTextInput('')
+        // Play TTS if not muted
+        if (!mutedRef.current && d.translated_text) {
+          try {
+            const ttsRes = await fetch(`${API_BASE_URL}/tts`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: d.translated_text, lang: (d.lang || targetLang).toLowerCase() }),
+            })
+            const ttsData = await ttsRes.json()
+            if (ttsData.audio_url) await playAudioUrl(ttsData.audio_url)
+            else speakText(d.translated_text, d.lang || targetLang)
+          } catch { speakText(d.translated_text, d.lang || targetLang) }
+        }
+      }
+    } catch(e) { console.error(e) }
+    finally { setTextLoading(false); setStatus('Press the button to start.') }
+  }
 
   const toggleTranslator = async () => {
     if (mediaAudioContext.current?.state === 'suspended') await mediaAudioContext.current.resume()
@@ -1150,31 +1533,51 @@ export default function App() {
             onBack={() => setPage('main')}
             onGoHistory={() => setPage('history')}
             onUserUpdate={handleUserUpdate}
-            onAvatarChange={url => setHeaderAvatarUrl(url)} />
+            onAvatarChange={url => setHeaderAvatarUrl(url)}
+            onModeChange={changeMode} />
         </div>
       )}
 
       {/* History page — full height, scrollable */}
       {page === 'history' && (
         <div className="subpage-wrap subpage-wrap--hist">
-          <HistoryPage authToken={authToken} muted={muted} onBack={() => setPage('profile')} />
+          <HistoryPage authToken={authToken} muted={muted} onBack={() => setPage('profile')} onRetranslate={handleRetranslate} onSaveEdit={handleSaveEdit} />
         </div>
       )}
 
       {/* Main page */}
       {page === 'main' && (
         <main className="app-main">
-          <p className="app-status">{status}</p>
-
-          <div className="listen-btn-wrap">
-            <button
-              className={`listen-pill ${isListening ? 'listen-pill--active' : ''}`}
-              onClick={toggleTranslator}>
-              <span className={`mic-dot ${isListening ? 'mic-dot--pulse' : ''}`}/>
-              <IconMic/>
-              <span>{isListening ? 'Listening…' : 'Start Listening'}</span>
-            </button>
-          </div>
+          {isSpeechInput ? (
+            <div className="listen-btn-wrap">
+              <button
+                className={`listen-pill ${isListening ? 'listen-pill--active' : ''}`}
+                onClick={toggleTranslator}
+                disabled={isFinalizing || isVoiceActive}>
+                <span className={`mic-dot ${isListening ? 'mic-dot--pulse' : ''}`}/>
+                {isFinalizing ? <IconTranslate/> : <IconMic/>}
+                <span>{isFinalizing ? 'Translating…' : isListening ? 'Listening…' : 'Start Listening'}</span>
+              </button>
+            </div>
+          ) : (
+            <div className="text-translate-wrap">
+              <textarea
+                className="text-translate-input"
+                placeholder="Type text to translate…"
+                value={textInput}
+                onChange={e => setTextInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleTextTranslate() } }}
+                rows={3}
+              />
+              <button
+                className={`listen-pill ${textLoading ? 'listen-pill--active' : ''}`}
+                onClick={handleTextTranslate}
+                disabled={textLoading || !textInput.trim()}>
+                <span className={`mic-dot ${textLoading ? 'mic-dot--pulse' : ''}`}/>
+                <span>{textLoading ? 'Translating…' : 'Translate'}</span>
+              </button>
+            </div>
+          )}
 
           <div className="live-card">
             <h3 className="section-title">Live Translations</h3>
@@ -1182,24 +1585,27 @@ export default function App() {
             {logs.length > 0 ? (
               <div className="logs-list">
                 {logs.map(entry => (
-                  <TranslationCard key={entry.id} entry={entry} muted={muted}/>
+                  <TranslationCard key={entry.id} entry={entry} muted={muted} onRetranslate={handleRetranslate} onSaveEdit={handleSaveEdit}/>
                 ))}
               </div>
             ) : (
-              <p className="hint-center">Press the button above and start speaking.</p>
+              <p className="hint-center">
+                {isSpeechInput ? 'Press the button above and start speaking.' : 'Type something above and press Translate.'}
+              </p>
             )}
           </div>
         </main>
       )}
 
       {showAuth && (
-        <AuthModal initialMode={authInitMode} onClose={() => setShowAuth(false)} />
+        <AuthModal initialMode={authInitMode} onClose={() => setShowAuth(false)} onModeChange={changeMode} />
       )}
       {showResetPassword && (
         <ResetPasswordModal onDone={() => { setShowResetPassword(false); setPage('main') }} />
       )}
       {showSettings && (
-        <SettingsModal muted={muted} onToggleMute={toggleMute} onClose={() => setShowSettings(false)}/>
+        <SettingsModal translationMode={translationMode} onModeChange={changeMode}
+          onClose={() => setShowSettings(false)}/>
       )}
     </div>
   )
