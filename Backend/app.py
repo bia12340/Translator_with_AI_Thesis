@@ -1,5 +1,6 @@
 import os
 import uuid
+import base64
 import uvicorn
 from supabase import create_client, Client
 from fastapi import FastAPI, UploadFile, File, Query, Request
@@ -10,7 +11,10 @@ from groq import Groq
 from fastapi import BackgroundTasks, Header
 import json
 import asyncio
+import time
 from dotenv import load_dotenv
+from fast_langdetect import detect as fastlang_detect
+import langcodes
 
 load_dotenv()
 
@@ -50,7 +54,10 @@ app.add_middleware(
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 print("[✓] Groq client inițializat cu succes")
 
+print("[✓] fast-langdetect disponibil")
+
 user_chat_histories = {}
+_timings: dict = {}          # colectare timpi pipeline per cerere
 
 # ─── Auth helper ──────────────────────────────────────────────────────────────
 def get_user_from_token(token: str):
@@ -73,107 +80,134 @@ def get_user_from_token(token: str):
         print(f"[auth] Token invalid: {e}")
         return None
 
+# ─── Whisper language name → ISO 639-1 ───────────────────────────────────────
+def normalize_whisper_lang(lang: str):
+    """Convertește numele limbii returnat de Whisper la cod ISO 639-1."""
+    if not lang:
+        return None
+    l = lang.strip()
+    if len(l) == 2 and l.isalpha():
+        return l.lower()
+    try:
+        return langcodes.find(l).language
+    except Exception:
+        return None
+
 # ─── AI translation ───────────────────────────────────────────────────────────
-def build_lang_instruction(native_lang: str, country_lang: str, default_target_lang: str) -> str:
+
+
+# ─── Session-aware target language ────────────────────────────────────────────
+session_lang_pairs = {}   # session_id → {"detected": str, "target": str}
+
+def determine_target_lang(detected_lang: str, native_lang: str, country_lang: str) -> str:
     """
-    Build the target-language decision rule injected into the AI system prompt.
-
-    Rules (applied only when the user does NOT explicitly name a target language):
-
-    CASE A — both native & country known, same language (e.g. nl=ro, cl=ro):
-      • source == that language  →  translate to English
-      • source != that language  →  translate to that language
-
-    CASE B — both known, different (e.g. nl=ro, cl=de):
-      • source == nl  →  translate to cl
-      • source == cl  →  translate to nl
-      • source is neither  →  translate to cl (user is in that country)
-
-    CASE C — only native known:
-      • source == nl  →  translate to English
-      • source != nl  →  translate to nl
-
-    CASE D — only country known:
-      • source == cl  →  translate to English
-      • source != cl  →  translate to cl
-
-    CASE E — neither known:
-      • source == English  →  translate to Spanish (globally understood)
-      • source != English  →  translate to English
+    Mecanismul de direcționare bazat pe profilul utilizatorului (cele 5 cazuri).
+    Oglindește exact diagrama de decizie din lucrare.
+    Returnează codul ISO 639-1 al limbii țintă.
     """
-    nl = (native_lang  or "").strip().lower()
-    cl = (country_lang or "").strip().lower()
+    dl = (detected_lang or "").strip().lower()
+    nl = (native_lang   or "").strip().lower()
+    cl = (country_lang  or "").strip().lower()
 
-    if nl and cl:
-        if nl == cl:
-            return (
-                f'REGULI LIMBĂ (nativă="{nl}", țară="{cl}", aceeași limbă):\n'
-                f'- Dacă limba sursă DETECTATĂ este "{nl}", traduce în "en" (engleză).\n'
-                f'- Dacă limba sursă DETECTATĂ NU este "{nl}", traduce în "{nl}".\n'
-                f'- NICIODATĂ nu traduce în aceeași limbă ca sursa.'
-            )
+    if nl:
+        if cl:
+            if nl == cl:
+                # Caz A: ambele configurate, aceeași limbă
+                if dl == nl:
+                    return "en"
+                else:
+                    return nl
+            else:
+                # Caz B: ambele configurate, limbi diferite
+                if dl == nl:
+                    return cl
+                else:
+                    return nl
         else:
-            return (
-                f'REGULI LIMBĂ (nativă="{nl}", țară="{cl}", limbi diferite):\n'
-                f'- Dacă limba sursă DETECTATĂ este "{nl}", traduce în "{cl}".\n'
-                f'- Dacă limba sursă DETECTATĂ este "{cl}", traduce în "{nl}".\n'
-                f'- Dacă sursa nu este nici "{nl}" nici "{cl}", traduce în "{cl}".\n'
-                f'- NICIODATĂ nu traduce în aceeași limbă ca sursa.'
-            )
-    elif nl:
-        return (
-            f'REGULI LIMBĂ (nativă="{nl}", țară necunoscută):\n'
-            f'- Dacă limba sursă DETECTATĂ este "{nl}", traduce în "en" (engleză).\n'
-            f'- Dacă limba sursă DETECTATĂ NU este "{nl}", traduce în "{nl}".\n'
-            f'- NICIODATĂ nu traduce în aceeași limbă ca sursa.'
-        )
-    elif cl:
-        return (
-            f'REGULI LIMBĂ (țară="{cl}", nativă necunoscută):\n'
-            f'- Dacă limba sursă DETECTATĂ este "{cl}", traduce în "en" (engleză).\n'
-            f'- Dacă limba sursă DETECTATĂ NU este "{cl}", traduce în "{cl}".\n'
-            f'- NICIODATĂ nu traduce în aceeași limbă ca sursa.'
-        )
+            # Caz C: doar limba nativă configurată
+            if dl == nl:
+                return "en"
+            else:
+                return nl
     else:
-        return (
-            'REGULI LIMBĂ (nicio preferință setată):\n'
-            '- Dacă limba sursă DETECTATĂ este "en" (engleză), traduce în "es" (spaniolă).\n'
-            '- Dacă limba sursă DETECTATĂ NU este "en", traduce în "en" (engleză).\n'
-            '- NICIODATĂ nu traduce în aceeași limbă ca sursa.'
-        )
+        if cl:
+            # Caz D: doar țara configurată
+            if dl == cl:
+                return "en"
+            else:
+                return cl
+        else:
+            # Caz E: nicio preferință
+            if dl == "en":
+                return "es"
+            else:
+                return "en"
 
 
-def ai_agent_process(text, user="default", use_memory=True, default_target_lang="en",
-                     native_lang="", country_lang=""):
+def detect_text_lang(text: str) -> str:
+    """Detectează limba unui text folosind fast-langdetect. Returnează codul ISO 639-1."""
+    if not text or len(text.strip()) < 2:
+        return "auto"
+    try:
+        result = fastlang_detect(text.strip())
+        if result:
+            return result[0]["lang"].lower()
+        return "auto"
+    except Exception:
+        return "auto"
+
+
+def compute_target_lang(detected_lang: str, session_id: str,
+                        native_lang: str, country_lang: str) -> str:
+    """
+    Determină limba țintă ținând cont de conversația anterioară din sesiune.
+    - Prima traducere din sesiune  → mecanismul de direcționare (profil).
+    - Continuare conversație        → folosește perechea salvată anterior.
+    """
+    dl = (detected_lang or "").strip().lower()
+    pair = session_lang_pairs.get(session_id) if session_id else None
+
+    if not pair:
+        # Prima traducere din sesiune
+        return determine_target_lang(dl, native_lang, country_lang)
+
+    prev_detected = pair.get("detected", "")
+    prev_target   = pair.get("target", "")
+
+    if dl == prev_target:
+        # Vorbește acum în limba în care s-a tradus anterior → întoarce conversația
+        return prev_detected
+    elif dl == prev_detected:
+        # Continuă în aceeași limbă → aceeași direcție ca înainte
+        return prev_target
+    else:
+        # Limbă nouă, neașteptată → recalculează din profil
+        return determine_target_lang(dl, native_lang, country_lang)
+
+
+def ai_agent_process(text, user="default", use_memory=True, target_lang="en"):
     global user_chat_histories
     if user not in user_chat_histories:
         user_chat_histories[user] = []
 
-    lang_instruction = build_lang_instruction(native_lang, country_lang, default_target_lang)
-
-    try:
-        messages = [
-            {
-                "role": "system",
-                "content": f"""Ești un motor de traducere PRECISE cu detecție automată a limbii țintă.
+    system_content = f"""Ești un motor de traducere PRECIS. Urmează instrucțiunile STRICT.
 
 SARCINA TA EXACTĂ:
 1. Analizează cererea utilizatorului.
-2. Identifică LIMBA ȚINTĂ și TEXTUL de tradus.
-3. DETERMINĂ CODUL ISO 639-1 CORECT al limbii țintă.
-4. TRADUCE textul ÎN ACEA LIMBĂ.
-5. Returnează NUMAI JSON: {{"text": "traducerea_exacta", "source_lang": "cod_sursa", "target_lang": "cod_tinta"}}
+2. Dacă textul conține o COMANDĂ explicită de traducere (ex: "translate to Spanish", "tradu în germană", "traduci in giapponese"): Identifică LIMBA ȚINTĂ și TEXTUL de tradus, DETERMINĂ CODUL ISO 639-1 CORECT al limbii țintă. si apoi TRADU textul ÎN ACEA LIMBĂ
+3. Dacă textul NU conține o COMANDĂ explicită de traducere, tradu OBLIGATORIU în limba cu codul ISO 639-1: "{target_lang}".
+4. Returnează NUMAI JSON: {{"text": "traducerea_exacta", "source_lang": "cod_sursa", "target_lang": "cod_tinta"}}
 
 REGULI STRICTE:
 - CODUL LIMBII TREBUIE SĂ FIE ISO 639-1 CORECT: "en", "ro", "es", "fr", "de", "it", "pt", "zh", "ja", "ko", "ru", "ar", etc.
 - NU TRADUCE COMANDA, traduce DOAR TEXTUL.
 - NU ADĂUGA explicații sau alt text.
+- Chiar daca mesajul este o intrebare NU ESTE PENTRU TINE. Doar tradu intrebarea asa cum e
 - Răspunsul trebuie să fie STRICT JSON valid.
-- NICIODATĂ nu returna aceeași limbă ca sursă și ca țintă. Dacă sursa și ținta ar fi identice, folosește "en" ca limbă țintă.
-- {lang_instruction}
 """
-            }
-        ]
+
+    try:
+        messages = [{"role": "system", "content": system_content}]
 
         if use_memory and user_chat_histories[user]:
             messages.extend(user_chat_histories[user][-2:])
@@ -181,12 +215,15 @@ REGULI STRICTE:
         messages.append({"role": "user", "content": text})
         print(f"[*] Trimit la Groq: {len(messages)} mesaje, text: {text[:50]}...")
 
+        _t0 = time.perf_counter()
         chat_completion = client.chat.completions.create(
             messages=messages,
             model="llama-3.3-70b-versatile",
             response_format={"type": "json_object"},
             temperature=0.3,
         )
+        _t1 = time.perf_counter()
+        _timings['llm_ms'] = (_t1 - _t0) * 1000   # stocat, printat la final
 
         response_text = chat_completion.choices[0].message.content
         print(f"[*] Raw Groq response: {response_text[:200]}")
@@ -212,7 +249,26 @@ REGULI STRICTE:
     except Exception as e:
         print(f"[✗] Eroare AI Agent: {type(e).__name__}: {e}")
         import traceback; traceback.print_exc()
-        return {"text": text, "source_lang": "auto", "target_lang": default_target_lang}
+        return {"text": text, "source_lang": "auto", "target_lang": target_lang}
+
+def retranslate(text: str, target_lang: str) -> dict:
+    """Prompt minimal pentru când LLM nu a tradus (source==target) — fără ambiguitate."""
+    try:
+        chat = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content":
+                    f'Translate the text to {target_lang}. '
+                    f'Return ONLY JSON: {{"text": "...", "source_lang": "...", "target_lang": "..."}}'},
+                {"role": "user", "content": text}
+            ],
+            model="llama-3.3-70b-versatile",
+            response_format={"type": "json_object"},
+            temperature=0.3,
+        )
+        return json.loads(chat.choices[0].message.content)
+    except Exception as e:
+        print(f"[✗] retranslate eroare: {e}")
+        return {"text": text, "source_lang": "auto", "target_lang": target_lang}
 
 # ─── History helpers ──────────────────────────────────────────────────────────
 def _authed_client(token: str):
@@ -401,12 +457,16 @@ async def normalize_country(payload: dict):
 # ─── AI translate endpoint ────────────────────────────────────────────────────
 @app.post("/ai_translate")
 async def ai_translate(payload: dict, authorization: str = Header(default="")):
-    text = payload.get("text", "").strip()
-    user_key = payload.get("user", "default")
+    text         = payload.get("text", "").strip()
+    native_lang  = payload.get("native_lang", "")
+    country_lang = payload.get("country_lang", "")
+    user_key     = payload.get("user", "default")
     if not text:
         return {"status": "failed", "error": "text gol"}
 
-    result = ai_agent_process(text, user_key)
+    detected    = detect_text_lang(text)
+    target_lang = determine_target_lang(detected, native_lang, country_lang)
+    result = ai_agent_process(text, user_key, target_lang=target_lang)
 
     token = authorization.replace("Bearer ", "").strip()
     current_user = get_user_from_token(token)
@@ -451,23 +511,83 @@ async def update_history_entry(client_entry_id: str, payload: dict, authorizatio
         return {"status": "error", "message": str(e)}
 
 
+@app.patch("/session/{session_id}")
+async def rename_session(session_id: str, payload: dict, authorization: str = Header(None)):
+    """Rename a session by updating session_name for all its entries."""
+    token = (authorization or "").replace("Bearer ", "").strip()
+    if not token:
+        return {"status": "error", "message": "Unauthorized"}
+    user = get_user_from_token(token)
+    if not user:
+        return {"status": "error", "message": "Invalid token"}
+    name = (payload.get("name") or "").strip()
+    try:
+        db = _authed_client(token)
+        db.table("translation_history_v2") \
+            .update({"session_name": name if name else None}) \
+            .eq("session_id", session_id) \
+            .eq("user_id", user["id"]) \
+            .execute()
+        print(f"[DB] ✓ Session {session_id[:8]}… renamed to '{name}'")
+        return {"status": "success"}
+    except Exception as e:
+        print(f"[DB] ✗ Rename session failed: {e}")
+        return {"status": "error", "message": str(e)}
+
 @app.post("/translate_text")
 async def translate_text(payload: dict):
     text         = payload.get("text", "").strip()
-    target_lang  = payload.get("target_lang", "en")
     native_lang  = payload.get("native_lang", "")
     country_lang = payload.get("country_lang", "")
     user_key     = payload.get("user", "live_user")
     no_memory    = payload.get("no_memory", False)
     if not text:
         return {"status": "failed", "error": "text gol"}
-    result = ai_agent_process(text, user=user_key, use_memory=not no_memory,
-                              default_target_lang=target_lang,
-                              native_lang=native_lang, country_lang=country_lang)
+
+    _t_total0 = time.perf_counter()
+
+    _t_det0  = time.perf_counter()
+    detected = detect_text_lang(text)
+    _t_det1  = time.perf_counter()
+    target_lang = determine_target_lang(detected, native_lang, country_lang)
+    print(f"[text] fast-langdetect: '{detected}' → target: '{target_lang}'")
+
+    # Memory dezactivat: contextul anterior confuza LLM-ul cu noul prompt directiv
+    result = ai_agent_process(text, user=user_key, use_memory=False,
+                              target_lang=target_lang)
+
+    retranslated = False
+    llm_source   = (result.get("source_lang") or "").strip().lower()
+    llm_target   = (result.get("target_lang") or "").strip().lower()
+
+    if llm_source and llm_source != detected:
+        # fast-langdetect a greșit — recalculăm target cu sursa corectă de la LLM
+        corrected_target = determine_target_lang(llm_source, native_lang, country_lang)
+        if corrected_target != llm_target:
+            # Target-ul s-ar schimba — merită re-tradus
+            print(f"[text] Re-traducere: fast='{detected}' llm_src='{llm_source}' "
+                  f"old_target='{llm_target}' new_target='{corrected_target}'")
+            result      = ai_agent_process(text, user=user_key, use_memory=False,
+                                           target_lang=corrected_target)
+            target_lang = corrected_target
+            retranslated = True
+
+    _t_total1 = time.perf_counter()
+    llm_ms_total = _timings.get('llm_ms', 0)
+    print(
+        f"\n{'─' * 48}\n"
+        f"  {'fast-langdetect':22} {(_t_det1 - _t_det0) * 1000:>7.0f} ms\n"
+        f"  {'Llama 3.3-70B (LLM)':22} {llm_ms_total:>7.0f} ms"
+        + (f" + re-traducere" if retranslated else "") +
+        f"\n  {'─' * 32}\n"
+        f"  {'TOTAL':22} {(_t_total1 - _t_total0) * 1000:>7.0f} ms\n"
+        f"{'─' * 48}\n"
+    )
+
     return {
-        "status":         "success",
+        "status":          "success",
         "translated_text": result.get("text", text),
-        "source_lang":     result.get("source_lang", "auto"),
+        "source_lang":     result.get("source_lang", detected),
         "lang":            result.get("target_lang", target_lang),
     }
 
@@ -478,6 +598,7 @@ async def process_audio(
     audio: UploadFile = File(...),
     target_lang: str = "en",
     client_entry_id: str = "",
+    session_id: str = "",
     native_lang: str = "",
     country_lang: str = "",
     authorization: str = Header(default=""),
@@ -505,11 +626,16 @@ async def process_audio(
             if os.path.exists(input_audio): os.remove(input_audio)
             return {"status": "ignored"}
 
+        _t_asr0 = time.perf_counter()
         with open(input_audio, "rb") as f:
             transcription = client.audio.transcriptions.create(
                 file=(input_audio, f.read()),
                 model="whisper-large-v3",
+                response_format="verbose_json",
             )
+        _t_asr1 = time.perf_counter()
+        _timings.clear()
+        _timings['asr_ms'] = (_t_asr1 - _t_asr0) * 1000
 
         original_text = transcription.text
         print(f"[✓] Transcriere: '{original_text}'")
@@ -520,32 +646,79 @@ async def process_audio(
 
         token        = authorization.replace("Bearer ", "").strip()
         current_user = get_user_from_token(token)
-        fallback_lang = (current_user or {}).get("main_language") or target_lang or "en"
+
+        # Whisper's language detection is more reliable than AI's source_lang guess
+        whisper_lang = normalize_whisper_lang(getattr(transcription, "language", None))
+        detected     = whisper_lang or "auto"
+        print(f"[LANG] whisper='{whisper_lang}' detected='{detected}'")
+
+        # Determină limba țintă (cu mecanismul de continuare a conversației pe sesiune)
+        tgt = compute_target_lang(detected, session_id, native_lang, country_lang)
 
         ai_result = ai_agent_process(
             original_text, user="audio_user",
-            use_memory=False, default_target_lang=fallback_lang,
-            native_lang=native_lang, country_lang=country_lang,
+            use_memory=False, target_lang=tgt,
         )
         print(f"[*] AI Result: {ai_result}")
 
-        translated_text   = ai_result.get("text", original_text)
-        # Whisper's language detection is more reliable than AI's source_lang guess
-        whisper_lang      = getattr(transcription, "language", None)
-        source_lang       = whisper_lang or ai_result.get("source_lang") or "auto"
-        final_target_lang = ai_result.get("target_lang") or ai_result.get("lang") or target_lang
+        # Dacă LLM nu a tradus (source == target) → re-traducere cu prompt minimal
+        if ai_result.get("source_lang") == ai_result.get("target_lang"):
+            print(f"[⚠] source==target=='{ai_result.get('source_lang')}' → re-traducere")
+            _t_retry0 = time.perf_counter()
+            ai_result = retranslate(original_text, tgt)
+            _t_retry1 = time.perf_counter()
+            _timings['retry_ms'] = (_t_retry1 - _t_retry0) * 1000
 
+        translated_text = ai_result.get("text", original_text)
+        source_lang     = whisper_lang or ai_result.get("source_lang") or "auto"
+
+        # Normalizează limba țintă: folosim valoarea LLM doar dacă e cod ISO valid (2 litere)
+        # altfel folosim tgt calculat de noi (întotdeauna cod ISO corect)
+        llm_target = (ai_result.get("target_lang") or "").strip().lower()
+        final_target_lang = llm_target if (len(llm_target) == 2 and llm_target.isalpha()) else tgt
+
+        print(f"[DIR] whisper='{whisper_lang}' detected='{detected}' tgt='{tgt}' llm_target='{llm_target}' final='{final_target_lang}'")
+
+        # Salvează perechea de limbi pentru continuarea conversației din sesiune
+        # Folosim 'detected' (de la Whisper, cod ISO fiabil) și 'final_target_lang' (normalizat)
+        if session_id and detected != "auto":
+            session_lang_pairs[session_id] = {
+                "detected": detected,
+                "target":   final_target_lang,
+            }
+            print(f"[SESSION] {session_id[:8]}… salvat: {detected} → {final_target_lang}")
+
+        _t_tts0 = time.perf_counter()
         try:
             gTTS(text=translated_text, lang=final_target_lang).save(output_mp3)
         except Exception as tts_err:
             print(f"[⚠] TTS fallback en: {tts_err}")
             gTTS(text=translated_text, lang="en").save(output_mp3)
+        _t_tts1 = time.perf_counter()
+        _timings['tts_ms'] = (_t_tts1 - _t_tts0) * 1000
+        _timings['total_ms'] = (_t_tts1 - _t_asr0) * 1000
+
+        retry_line = (
+            f"  {'Llama retry':22} {_timings.get('retry_ms', 0):>7.0f} ms\n"
+            if 'retry_ms' in _timings else ""
+        )
+        print(
+            f"\n{'─' * 48}\n"
+            f"  {'Whisper  (ASR)':22} {_timings.get('asr_ms', 0):>7.0f} ms\n"
+            f"  {'Llama 3.3-70B (LLM)':22} {_timings.get('llm_ms', 0):>7.0f} ms\n"
+            + retry_line +
+            f"  {'gTTS  (TTS)':22} {_timings.get('tts_ms', 0):>7.0f} ms\n"
+            f"  {'─' * 32}\n"
+            f"  {'TOTAL':22} {_timings.get('total_ms', 0):>7.0f} ms\n"
+            f"{'─' * 48}\n"
+        )
 
         if os.path.exists(input_audio): os.remove(input_audio)
 
-        base_url = str(request.base_url).rstrip("/")
-        if ".hf.space" in base_url:
-            base_url = base_url.replace("http://", "https://")
+        # Citește MP3-ul și îl trimite direct ca base64 — elimină round-trip-ul suplimentar
+        with open(output_mp3, "rb") as f:
+            audio_b64 = base64.b64encode(f.read()).decode()
+        if os.path.exists(output_mp3): os.remove(output_mp3)
 
         return {
             "status":          "success",
@@ -553,7 +726,7 @@ async def process_audio(
             "target_lang":     final_target_lang,
             "original_text":   original_text,
             "translated_text": translated_text,
-            "audio_url":       f"{base_url}/get_audio/{output_mp3}",
+            "audio_data":      audio_b64,
         }
 
     except Exception as e:

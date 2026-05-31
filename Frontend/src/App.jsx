@@ -114,6 +114,14 @@ const playAudioUrl = (url) => new Promise(resolve => {
   a.play().catch(resolve)
 })
 
+const base64ToUrl = (b64) => {
+  const binary = atob(b64)
+  const bytes  = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  const blob = new Blob([bytes], { type: 'audio/mpeg' })
+  return URL.createObjectURL(blob)
+}
+
 // ─── TranslationCard ──────────────────────────────────────────────────────────
 function TranslationCard({ entry, muted, onRetranslate, onSaveEdit }) {
   const [copied,    setCopied]    = useState(false)
@@ -545,7 +553,6 @@ function ProfilePage({ authUser, authToken, onBack, onGoHistory, onUserUpdate, o
 
 // ─── HistoryPage ──────────────────────────────────────────────────────────────
 const LS_OPEN  = 'hist_open_days'
-const LS_NAMES = 'hist_day_names'
 
 function HistoryPage({ authToken, muted, onBack, onRetranslate, onSaveEdit }) {
   const [entries,    setEntries]    = useState([])
@@ -561,14 +568,10 @@ function HistoryPage({ authToken, muted, onBack, onRetranslate, onSaveEdit }) {
   const [openDays,   setOpenDays]   = useState(() => {
     try { return JSON.parse(localStorage.getItem(LS_OPEN) || '{}') } catch { return {} }
   })
-  const [dayNames,   setDayNames]   = useState(() => {
-    try { return JSON.parse(localStorage.getItem(LS_NAMES) || '{}') } catch { return {} }
-  })
   const [editingDay, setEditingDay] = useState(null)
   const [editName,   setEditName]   = useState('')
 
-  useEffect(() => { localStorage.setItem(LS_OPEN,  JSON.stringify(openDays))  }, [openDays])
-  useEffect(() => { localStorage.setItem(LS_NAMES, JSON.stringify(dayNames))  }, [dayNames])
+  useEffect(() => { localStorage.setItem(LS_OPEN, JSON.stringify(openDays)) }, [openDays])
 
   useEffect(() => {
     const load = async () => {
@@ -582,9 +585,9 @@ function HistoryPage({ authToken, muted, onBack, onRetranslate, onSaveEdit }) {
           console.log(`[DB] Istoric: ${list.length} intrări găsite în Supabase`)
           setEntries(list)
           if (list.length) {
-            const firstDay = new Date(list[0].created_at).toLocaleDateString('ro-RO')
+            const firstSession = list[0].session_id
             setOpenDays(prev =>
-              typeof prev[firstDay] === 'undefined' ? { ...prev, [firstDay]: true } : prev
+              typeof prev[firstSession] === 'undefined' ? { ...prev, [firstSession]: true } : prev
             )
           }
         }
@@ -594,17 +597,31 @@ function HistoryPage({ authToken, muted, onBack, onRetranslate, onSaveEdit }) {
     load()
   }, [authToken])
 
-  // Group entries by local date
+  // Group entries by session_id
   const grouped = entries.reduce((acc, e) => {
-    const k = new Date(e.created_at).toLocaleDateString('ro-RO')
+    const k = e.session_id || 'unknown'
     if (!acc[k]) acc[k] = []
     acc[k].push(e); return acc
   }, {})
 
-  const toggleDay    = (day) => setOpenDays(p => ({ ...p, [day]: !p[day] }))
-  const startRename  = (e, day) => { e.stopPropagation(); setEditingDay(day); setEditName(dayNames[day] || '') }
-  const confirmRename= (e, day) => { e.stopPropagation(); setDayNames(p => ({ ...p, [day]: editName.trim() })); setEditingDay(null) }
-  const cancelRename = (e)       => { e.stopPropagation(); setEditingDay(null) }
+  const toggleDay     = (sid) => setOpenDays(p => ({ ...p, [sid]: !p[sid] }))
+  const startRename   = (e, sid, currentName) => { e.stopPropagation(); setEditingDay(sid); setEditName(currentName || '') }
+  const confirmRename = async (e, sid) => {
+    e.stopPropagation()
+    const name = editName.trim()
+    try {
+      await fetch(`${API_BASE_URL}/session/${encodeURIComponent(sid)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+        body: JSON.stringify({ name })
+      })
+      setEntries(prev => prev.map(entry =>
+        entry.session_id === sid ? { ...entry, session_name: name || null } : entry
+      ))
+    } catch (err) { console.error('[rename session]', err) }
+    setEditingDay(null)
+  }
+  const cancelRename  = (e) => { e.stopPropagation(); setEditingDay(null) }
 
   return (
     <div className="page-inner hist-page-inner">
@@ -621,61 +638,70 @@ function HistoryPage({ authToken, muted, onBack, onRetranslate, onSaveEdit }) {
       ) : entries.length === 0 ? (
         <div className="hint-center">No saved entries yet.</div>
       ) : (
-        /* Outer: scrolls through all day-groups */
+        /* Outer: scrolls through all session-groups */
         <div className="hist-outer-scroll">
-          {Object.entries(grouped).map(([day, dayEntries]) => (
-            <div key={day} className="history-group">
+          {(() => {
+            const dateCounters = {}
+            return Object.entries(grouped).map(([sessionId, sessionEntries]) => {
+              const sessionName  = sessionEntries[0]?.session_name || ''
+              const fallbackDate = new Date(sessionEntries[sessionEntries.length - 1]?.created_at).toLocaleDateString('ro-RO')
+              if (!dateCounters[fallbackDate]) dateCounters[fallbackDate] = 0
+              dateCounters[fallbackDate]++
+              const sessionNumber = dateCounters[fallbackDate]
+              const sessionLabel  = sessionName || `Session ${sessionNumber}`
+              return (
+                <div key={sessionId} className="history-group">
 
-              {/* Day header */}
-              <div className="history-group-header" onClick={() => toggleDay(day)}>
-                <div className="history-group-left">
-                  <span className="history-chevron">
-                    {openDays[day] ? <IconChevD /> : <IconChevR />}
-                  </span>
+                  {/* Session header */}
+                  <div className="history-group-header" onClick={() => toggleDay(sessionId)}>
+                    <div className="history-group-left">
+                      <span className="history-chevron">
+                        {openDays[sessionId] ? <IconChevD /> : <IconChevR />}
+                      </span>
 
-                  {editingDay === day ? (
-                    <div className="day-rename-wrap" onClick={e => e.stopPropagation()}>
-                      <span className="history-day-date">{day}</span>
-                      <span className="history-day-sep"> — </span>
-                      <input className="day-rename-input" value={editName} autoFocus
-                        placeholder="Conversation name…"
-                        onChange={e => setEditName(e.target.value)}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter')  confirmRename(e, day)
-                          if (e.key === 'Escape') cancelRename(e)
-                        }} />
-                      <button className="rename-save-btn"   onClick={e => confirmRename(e, day)}>Save</button>
-                      <button className="rename-cancel-btn" onClick={cancelRename}>✕</button>
+                      {editingDay === sessionId ? (
+                        <div className="day-rename-wrap" onClick={e => e.stopPropagation()}>
+                          <span className="history-day-date">{fallbackDate} —</span>
+                          <input className="day-rename-input" value={editName} autoFocus
+                            placeholder="Session name…"
+                            onChange={e => setEditName(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter')  confirmRename(e, sessionId)
+                              if (e.key === 'Escape') cancelRename(e)
+                            }} />
+                          <button className="rename-save-btn"  onClick={e => confirmRename(e, sessionId)}>Save</button>
+                          <button className="rename-cancel-btn" onClick={cancelRename}>✕</button>
+                        </div>
+                      ) : (
+                        <>
+                          <span className="history-day-label">
+                            {fallbackDate} — {sessionLabel}
+                          </span>
+                          <button className="icon-btn history-edit-btn"
+                            onClick={e => startRename(e, sessionId, sessionName)} title="Rename">
+                            <IconEdit size={13} />
+                          </button>
+                        </>
+                      )}
                     </div>
-                  ) : (
-                    <span className="history-day-label">
-                      {day}
-                      {dayNames[day] && <> — <span className="history-day-custom">{dayNames[day]}</span></>}
-                    </span>
+
+                    <div className="history-group-right">
+                      <span className="history-count">{sessionEntries.length} translations</span>
+                    </div>
+                  </div>
+
+                  {/* Inner: scrolls through this session's cards */}
+                  {openDays[sessionId] && (
+                    <div className="hist-inner-scroll">
+                      {sessionEntries.map((e, i) => (
+                        <TranslationCard key={e.client_entry_id || i} entry={e} muted={muted} onRetranslate={onRetranslate} onSaveEdit={handleSaveEditHistory} />
+                      ))}
+                    </div>
                   )}
                 </div>
-
-                <div className="history-group-right">
-                  <span className="history-count">{dayEntries.length} translations</span>
-                  {editingDay !== day && (
-                    <button className="icon-btn history-edit-btn"
-                      onClick={e => startRename(e, day)} title="Rename">
-                      <IconEdit size={13} />
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Inner: scrolls through this day's cards */}
-              {openDays[day] && (
-                <div className="hist-inner-scroll">
-                  {dayEntries.map((e, i) => (
-                    <TranslationCard key={e.client_entry_id || i} entry={e} muted={muted} onRetranslate={onRetranslate} onSaveEdit={handleSaveEditHistory} />
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
+              )
+            })
+          })()}
         </div>
       )}
     </div>
@@ -1357,7 +1383,7 @@ export default function App() {
     try {
       setStatus('Traducere în curs...')
       const r = await fetch(
-        `${API_BASE_URL}/process?target_lang=${targetLang}&client_entry_id=${encodeURIComponent(cei)}&native_lang=${encodeURIComponent(nativeLang)}&country_lang=${encodeURIComponent(countryLang)}`,
+        `${API_BASE_URL}/process?target_lang=${targetLang}&client_entry_id=${encodeURIComponent(cei)}&session_id=${encodeURIComponent(sessionIdRef.current)}&native_lang=${encodeURIComponent(nativeLang)}&country_lang=${encodeURIComponent(countryLang)}`,
         { method:'POST', headers: currentToken ? {Authorization:`Bearer ${currentToken}`} : {}, body: fd }
       )
       const data = await r.json()
@@ -1380,9 +1406,11 @@ export default function App() {
       setLogs(prev => [entry, ...prev])
       if (currentToken) persistHistoryEntries([entry], currentToken)
 
-      if (data.audio_url && !mutedRef.current) {
+      if (data.audio_data && !mutedRef.current) {
         setStatus('Redau traducerea...')
-        await playAudioUrl(data.audio_url)
+        const url = base64ToUrl(data.audio_data)
+        await playAudioUrl(url)
+        URL.revokeObjectURL(url)
       }
     } catch(e) { console.error(e); setStatus('Eroare server') }
     finally { setIsFinalizing(false); setVoiceActive(false); if (keepListening.current) setStatus('Te ascult…') }
