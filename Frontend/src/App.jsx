@@ -2,11 +2,12 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { supabase } from './supabaseClient'
 import {
   Sun, Moon, User, Copy, Volume2, VolumeX, Mic,
-  LogOut, Settings, ChevronRight, ChevronDown, Pencil,
+  LogOut, Settings, ChevronRight, ChevronDown, Pencil, Trash2,
   Clock, Globe, MapPin, Languages, History, LogIn,
-  UserPlus, Camera, Eye, EyeOff, FileText, Keyboard,
+  UserPlus, Camera, Eye, EyeOff, FileText, Keyboard, X,
 } from 'lucide-react'
-import './App.css'
+import { getCountryDataList, getCountryData } from 'countries-list'
+import ISO6391 from 'iso-639-1'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:7860';
 
@@ -48,6 +49,7 @@ const IconProfile  = () => <User size={16} />
 const IconChevR    = () => <ChevronRight size={16} />
 const IconChevD    = () => <ChevronDown size={16} />
 const IconEdit     = ({ size=14 }) => <Pencil size={size} />
+const IconTrash    = ({ size=14 }) => <Trash2 size={size} />
 const IconClock    = () => <Clock size={12} />
 const IconGlobe    = () => <Globe size={16} />
 const IconMapPin   = () => <MapPin size={16} />
@@ -57,44 +59,144 @@ const IconSignIn   = () => <LogIn size={16} />
 const IconUserPlus = () => <UserPlus size={16} />
 const IconCamera   = () => <Camera size={16} />
 
-// ─── Lang names ───────────────────────────────────────────────────────────────
-const LANG_NAMES = { ro:'Romanian',en:'English',fr:'French',de:'German',es:'Spanish',it:'Italian',pt:'Portuguese',zh:'Chinese',ja:'Japanese',ko:'Korean',ru:'Russian',ar:'Arabic',pl:'Polish',nl:'Dutch',tr:'Turkish',hi:'Hindi',vi:'Vietnamese',th:'Thai',auto:'Auto-detect' }
-const getLangName = c => LANG_NAMES[(c||'').toLowerCase()] || (c||'').toUpperCase()
-
-// ─── Country → primary language ───────────────────────────────────────────────
-const COUNTRY_TO_LANG = {
-  AD:'ca', AE:'ar', AL:'sq', AM:'hy', AR:'es', AT:'de', AU:'en', AZ:'az',
-  BA:'bs', BE:'nl', BG:'bg', BR:'pt', BY:'be', CA:'en', CH:'de', CN:'zh',
-  CY:'el', CZ:'cs', DE:'de', DK:'da', EE:'et', EG:'ar', ES:'es', FI:'fi',
-  FR:'fr', GB:'en', GE:'ka', GR:'el', HR:'hr', HU:'hu', ID:'id', IE:'en',
-  IL:'he', IN:'hi', IS:'is', IT:'it', JP:'ja', KR:'ko', KZ:'kk', LT:'lt',
-  LU:'fr', LV:'lv', MA:'ar', MD:'ro', ME:'sr', MK:'mk', MT:'mt', MX:'es',
-  NL:'nl', NO:'no', NZ:'en', PL:'pl', PT:'pt', RO:'ro', RS:'sr', RU:'ru',
-  SE:'sv', SI:'sl', SK:'sk', TH:'th', TR:'tr', UA:'uk', US:'en', UZ:'uz',
-  VN:'vi', XK:'sq', ZA:'en',
+// ─── Country flag + select ────────────────────────────────────────────────────
+const FlagImg = ({ code }) => {
+  const src = code === 'ca'
+    ? '/flags/ca.svg'
+    : `https://flagcdn.com/w20/${(code||'').toLowerCase()}.png`
+  return (
+    <img
+      src={src}
+      alt={code}
+      style={{ width: 20, height: 14, objectFit: 'cover', borderRadius: 2, flexShrink: 0 }}
+      onError={e => { e.target.style.display = 'none' }}
+    />
+  )
 }
-const countryToLang = code => COUNTRY_TO_LANG[(code || '').toUpperCase()] || ''
 
-// ─── Country names ────────────────────────────────────────────────────────────
-const COUNTRY_NAMES = {
-  AD:'Andorra',AE:'United Arab Emirates',AL:'Albania',AM:'Armenia',AT:'Austria',
-  AU:'Australia',AZ:'Azerbaijan',BA:'Bosnia and Herzegovina',BE:'Belgium',BG:'Bulgaria',
-  BR:'Brazil',BY:'Belarus',CA:'Canada',CH:'Switzerland',CN:'China',CY:'Cyprus',
-  CZ:'Czech Republic',DE:'Germany',DK:'Denmark',EE:'Estonia',EG:'Egypt',
-  ES:'Spain',FI:'Finland',FR:'France',GB:'United Kingdom',GE:'Georgia',
-  GR:'Greece',HR:'Croatia',HU:'Hungary',ID:'Indonesia',IE:'Ireland',
-  IL:'Israel',IN:'India',IS:'Iceland',IT:'Italy',JP:'Japan',
-  KR:'South Korea',KZ:'Kazakhstan',LT:'Lithuania',LU:'Luxembourg',LV:'Latvia',
-  MA:'Morocco',MD:'Moldova',ME:'Montenegro',MK:'North Macedonia',MT:'Malta',
-  MX:'Mexico',NL:'Netherlands',NO:'Norway',NZ:'New Zealand',PL:'Poland',
-  PT:'Portugal',RO:'Romania',RS:'Serbia',RU:'Russia',SE:'Sweden',
-  SI:'Slovenia',SK:'Slovakia',TH:'Thailand',TR:'Turkey',UA:'Ukraine',
-  US:'United States',UZ:'Uzbekistan',VN:'Vietnam',XK:'Kosovo',ZA:'South Africa',
-}
-const getCountryDisplay = code => {
-  if (!code) return ''
-  const up = code.toUpperCase()
-  return COUNTRY_NAMES[up] ? `${COUNTRY_NAMES[up]} (${up})` : up
+
+// ─── Language select  ────────────────
+const SELECTED_COUNTRIES = [
+  'GB','US','DE','AT','NL','SE','DK','NO','IS','FI',             // English, German, Dutch, Nordic
+  'RO','ES','MX','AR','PT','BR','FR','BE','IT',                  // Romanian, Spanish, Portuguese, French, Italian
+  'RU','UA','PL','CZ','SK','BG','HR','RS','SI','BA','MK','BY',   // Limbi Slavice
+  'AD','HU','GR','AL','MT','EE','LV','LT','GE','AM',             // Alte limbi europene + Catalan
+  'TR','AZ','KZ',                                                // Turco-altaice
+  'CN','JP','KR','VN','TH','ID','MY','PH',                       // Asia de Est/Sud-Est
+  'IN','BD',                                                     // Asia de Sud
+  'SA','EG','PS','MA','IR',                                      // Orientul Mijlociu
+  'TZ',                                                          // Africa
+]
+
+const _RAW_LANG_OPTIONS = SELECTED_COUNTRIES
+  .map(iso2 => {
+    const data = getCountryData(iso2)
+    if (!data) return null
+    const langCode = data.languages?.[0]
+    if (!langCode) return null
+    return {
+      langCode,
+      flagCode: iso2.toLowerCase(),
+      native:   ISO6391.getNativeName(langCode) || ISO6391.getName(langCode) || langCode.toUpperCase(),
+      english:  ISO6391.getName(langCode) || langCode.toUpperCase(),
+      country:  data.name,
+    }
+  })
+  .filter(Boolean)
+
+// Grupare pe langCode — prima apariție ia steagul, restul adaugă țara la listă
+const LANGUAGE_OPTIONS = (() => {
+  const groups = {}
+  _RAW_LANG_OPTIONS.forEach(opt => {
+    if (!groups[opt.langCode]) {
+      groups[opt.langCode] = { ...opt, countries: [opt.country] }
+    } else {
+      groups[opt.langCode].countries.push(opt.country)
+    }
+  })
+  const result = Object.values(groups).sort((a, b) => a.english.localeCompare(b.english))
+  // Catalana folosește steagul Senyerei (nu steagul Andorrei)
+  const ca = result.find(o => o.langCode === 'ca')
+  if (ca) ca.flagCode = 'ca'
+  return result
+})()
+
+function LanguageSelect({ value, onChange, placeholder = 'Search language…' }) {
+  const [query, setQuery] = useState('')
+  const [open,  setOpen]  = useState(false)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    const handler = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const q = query.toLowerCase()
+  const filtered = LANGUAGE_OPTIONS.filter(o =>
+    o.english.toLowerCase().startsWith(q) ||
+    o.native.toLowerCase().startsWith(q) ||
+    o.langCode.toLowerCase().startsWith(q) ||
+    o.countries.some(c => c.toLowerCase().startsWith(q))
+  )
+
+  const selected = value ? LANGUAGE_OPTIONS.find(o => o.langCode === value.toLowerCase()) : null
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <div
+        className="field"
+        style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}
+        onClick={() => setOpen(o => !o)}
+      >
+        {selected
+          ? <><FlagImg code={selected.flagCode} /><span>{selected.native} <span style={{color:'var(--text-muted)',fontSize:'0.85rem'}}>({selected.english})</span></span><span style={{color:'var(--text-muted)',fontSize:'0.85rem',marginLeft:4}}>– {selected.countries.join(', ')}</span></>
+          : <span style={{ color: 'var(--text-muted)' }}>{placeholder}</span>
+        }
+        <span style={{ marginLeft: 'auto', opacity: 0.4, fontSize: '0.75rem' }}>▼</span>
+      </div>
+      {open && (
+        <div style={{
+          position: 'absolute', zIndex: 999, top: '100%', left: 0, right: 0,
+          background: 'var(--dropdown-bg)', border: '1px solid var(--border)',
+          borderRadius: 10, boxShadow: 'var(--dropdown-shadow)',
+          maxHeight: 260, display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        }}>
+          <input
+            autoFocus
+            className="field"
+            style={{ margin: 6, marginBottom: 4, borderRadius: 7 }}
+            placeholder="Caută limbă…"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onClick={e => e.stopPropagation()}
+          />
+          <div style={{ overflowY: 'auto', flex: 1 }}>
+            {filtered.length === 0
+              ? <div style={{ padding: '10px 16px', color: 'var(--text-muted)', fontSize: '0.85rem' }}>Niciun rezultat</div>
+              : filtered.map(opt => (
+                <div
+                  key={opt.flagCode}
+                  onClick={() => { onChange(opt.langCode); setQuery(''); setOpen(false) }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10,
+                    padding: '8px 14px', cursor: 'pointer', fontSize: '0.9rem',
+                    background: opt.langCode === value?.toLowerCase() ? 'var(--accent-light)' : 'transparent',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'var(--btn-icon-bg)'}
+                  onMouseLeave={e => e.currentTarget.style.background = opt.langCode === value?.toLowerCase() ? 'var(--accent-light)' : 'transparent'}
+                >
+                  <FlagImg code={opt.flagCode} />
+                  <span>{opt.native} <span style={{color:'var(--text-muted)',fontSize:'0.8rem'}}>({opt.english})</span></span>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginLeft: 'auto' }}>{opt.countries.join(', ')}</span>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ─── Audio helpers ─────────────────────────────────────────────────────────────
@@ -106,9 +208,10 @@ const speakText = (text, lang) => {
   window.speechSynthesis.speak(utt)
 }
 
-const playAudioUrl = (url) => new Promise(resolve => {
+const playAudioUrl = (url, speed = 1.0) => new Promise(resolve => {
   if (!url) { resolve(); return }
   const a = new Audio(url)
+  a.playbackRate = speed
   a.onended = resolve
   a.onerror  = resolve
   a.play().catch(resolve)
@@ -123,7 +226,7 @@ const base64ToUrl = (b64) => {
 }
 
 // ─── TranslationCard ──────────────────────────────────────────────────────────
-function TranslationCard({ entry, muted, onRetranslate, onSaveEdit }) {
+function TranslationCard({ entry, muted, playbackSpeed = 1.0, onRetranslate, onSaveEdit, onDelete, isPlayingGlobal, setIsPlayingGlobal }) {
   const [copied,    setCopied]    = useState(false)
   const [playing,   setPlaying]   = useState(false)
   const [editing,   setEditing]   = useState(false)
@@ -146,23 +249,21 @@ function TranslationCard({ entry, muted, onRetranslate, onSaveEdit }) {
     const text = displayTrans
     if (!text) return
     setPlaying(true)
+    setIsPlayingGlobal?.(true)
     try {
-      if (entry.audio_url && !isEdited) {
-        await playAudioUrl(entry.audio_url)
-      } else {
-        const r = await fetch(`${API_BASE_URL}/tts`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, lang: displayTargetLang.toLowerCase() }),
-        })
-        const d = await r.json()
-        if (d.audio_url) await playAudioUrl(d.audio_url)
-        else speakText(text, displayTargetLang)
-      }
+      const r = await fetch(`${API_BASE_URL}/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, lang: displayTargetLang.toLowerCase() }),
+      })
+      const d = await r.json()
+      if (d.audio_url) await playAudioUrl(d.audio_url, playbackSpeed)
+      else speakText(text, displayTargetLang)
     } catch {
       speakText(text, displayTargetLang)
     }
     setPlaying(false)
+    setIsPlayingGlobal?.(false)
   }
 
   const handleEditSave = async () => {
@@ -183,7 +284,7 @@ function TranslationCard({ entry, muted, onRetranslate, onSaveEdit }) {
     if (onRetranslate) {
       setRetranslating(true)
       try {
-        const result = await onRetranslate(trimmed)
+        const result = await onRetranslate(trimmed, displayTargetLang.toLowerCase())
         if (result?.translated_text) {
           updates.translated_text = result.translated_text
           setDisplayTrans(result.translated_text)
@@ -194,6 +295,23 @@ function TranslationCard({ entry, muted, onRetranslate, onSaveEdit }) {
           if (result.source_lang && result.source_lang !== 'auto') {
             updates.source_lang = result.source_lang.toLowerCase()
             setDisplaySourceLang(result.source_lang.toUpperCase())
+          }
+          // Redă TTS automat după ce React a randat noua traducere
+          if (!muted) {
+            const textToPlay = result.translated_text
+            const langToPlay = (result.lang || displayTargetLang).toLowerCase()
+            setTimeout(async () => {
+              try {
+                const ttsRes = await fetch(`${API_BASE_URL}/tts`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ text: textToPlay, lang: langToPlay }),
+                })
+                const ttsData = await ttsRes.json()
+                if (ttsData.audio_url) await playAudioUrl(ttsData.audio_url, playbackSpeed)
+                else speakText(textToPlay, langToPlay)
+              } catch { speakText(textToPlay, langToPlay) }
+            }, 0)
           }
         }
       } catch {}
@@ -224,9 +342,14 @@ function TranslationCard({ entry, muted, onRetranslate, onSaveEdit }) {
           {isEdited && <span className="tcard-edited-badge">Edited</span>}
           <div style={{flex:1}}/>
           {!editing && (
-            <button className="tcard-edit-btn" onClick={() => setEditing(true)} title="Edit original text">
-              <IconEdit size={12}/>
-            </button>
+            <div style={{display:'flex',gap:4}}>
+              <button className="tcard-edit-btn" onClick={() => setEditing(true)} title="Edit original text">
+                <IconEdit size={15}/>
+              </button>
+              <button className="tcard-edit-btn tcard-delete-btn" onClick={() => onDelete?.(entry.client_entry_id)} title="Delete translation">
+                <IconTrash size={15}/>
+              </button>
+            </div>
           )}
         </div>
         {editing ? (
@@ -236,6 +359,7 @@ function TranslationCard({ entry, muted, onRetranslate, onSaveEdit }) {
               value={editValue}
               onChange={e => setEditValue(e.target.value)}
               autoFocus
+              onFocus={e => { const v = e.target.value; e.target.value = ''; e.target.value = v }}
               rows={2}
               onKeyDown={e => {
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleEditSave() }
@@ -282,7 +406,7 @@ function TranslationCard({ entry, muted, onRetranslate, onSaveEdit }) {
           <button
             className={`icon-btn ${muted || !transText ? 'icon-btn--muted' : ''} ${playing ? 'icon-btn--active' : ''}`}
             onClick={handlePlay}
-            disabled={!transText || playing || retranslating}
+            disabled={!transText || playing || retranslating || isPlayingGlobal}
             title={playing ? 'Playing…' : retranslating ? 'Translating…' : muted ? 'TTS muted — change in Settings' : !transText ? 'No translation available' : 'Play translation'}
           >
             {muted ? <IconMute /> : <IconVolume />}
@@ -294,14 +418,7 @@ function TranslationCard({ entry, muted, onRetranslate, onSaveEdit }) {
 }
 
 // ─── ProfilePage ──────────────────────────────────────────────────────────────
-function detectCountryFromLocale() {
-  const locale = navigator.language || navigator.userLanguage || ''
-  const parts = locale.split('-')
-  return parts.length >= 2 ? parts[parts.length - 1].toUpperCase() : ''
-}
-
-function ProfilePage({ authUser, authToken, onBack, onGoHistory, onUserUpdate, onAvatarChange, onModeChange }) {
-  const [editing,  setEditing]  = useState(null)
+function ProfilePage({ authUser, onBack, onGoHistory, onUserUpdate, onAvatarChange, onModeChange, onSessionReset }) {
   const [mainLang, setMainLang] = useState(
     authUser?.main_language || localStorage.getItem('translator_main_lang') || ''
   )
@@ -310,8 +427,6 @@ function ProfilePage({ authUser, authToken, onBack, onGoHistory, onUserUpdate, o
     localStorage.getItem(`user_country_${authUser?.id}`) ||
     ''
   )
-  // Timezone is auto-detected — never editable, never sent to backend
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
   const [saving,      setSaving]      = useState(false)
   const [error,       setError]       = useState('')
   const [prefMode,    setPrefMode]    = useState(authUser?.preferred_mode || localStorage.getItem('translation_mode') || 'speech-speech')
@@ -364,94 +479,6 @@ function ProfilePage({ authUser, authToken, onBack, onGoHistory, onUserUpdate, o
     reader.readAsDataURL(file)
   }
 
-  const saveField = async (field, value) => {
-    setSaving(true); setError('')
-    try {
-      let normalizedValue = value.trim()
-
-      // Country: normalize via Groq, save to localStorage only (no DB column yet)
-      if (field === 'country') {
-        if (normalizedValue) {
-          try {
-            const nr = await fetch(`${API_BASE_URL}/normalize_country`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ text: normalizedValue }),
-            })
-            const nd = await nr.json()
-            if (nd.iso_code) normalizedValue = nd.iso_code
-            else normalizedValue = normalizedValue.toUpperCase().slice(0, 2)
-          } catch {
-            normalizedValue = normalizedValue.toUpperCase().slice(0, 2)
-          }
-        }
-        localStorage.setItem(`user_country_${authUser?.id}`, normalizedValue)
-        setCountry(normalizedValue)
-        setEditing(null)
-        return
-      }
-
-      // Language: normalize via Groq, save to backend
-      if (field === 'lang' && normalizedValue) {
-        try {
-          const nr = await fetch(`${API_BASE_URL}/normalize_language`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: normalizedValue }),
-          })
-          const nd = await nr.json()
-          if (nd.iso_code) normalizedValue = nd.iso_code
-          else normalizedValue = normalizedValue.toLowerCase().slice(0, 2)
-        } catch {
-          normalizedValue = normalizedValue.toLowerCase().slice(0, 2)
-        }
-      }
-
-      const { data, error: sbErr } = await supabase.auth.updateUser({
-        data: { main_language: normalizedValue || null }
-      })
-      if (sbErr) { setError(sbErr.message); return }
-      onUserUpdate(data.user)
-      const lang = normalizedValue || ''
-      setMainLang(lang)
-      if (lang) localStorage.setItem('translator_main_lang', lang)
-      setEditing(null)
-    } catch { setError('Server error — check console') }
-    finally { setSaving(false) }
-  }
-
-  const EditRow = ({ icon, label, value, fieldKey, setter, currentVal, readOnly = false }) => (
-    <div className="profile-row">
-      <div className="profile-row-left">
-        <span className="profile-row-icon">{icon}</span>
-        <div style={{ flex:1, minWidth:0 }}>
-          <div className="profile-row-label">{label}</div>
-          {!readOnly && editing === fieldKey ? (
-            <input className="profile-edit-input" value={currentVal}
-              onChange={e => setter(e.target.value)} autoFocus
-              onKeyDown={e => {
-                if (e.key === 'Enter')  saveField(fieldKey, currentVal)
-                if (e.key === 'Escape') setEditing(null)
-              }} />
-          ) : (
-            <div className="profile-row-value">{value || <span style={{opacity:.4}}>Not set</span>}</div>
-          )}
-        </div>
-      </div>
-      <div className="profile-row-right">
-        {!readOnly && (editing === fieldKey ? (
-          <>
-            <button className="profile-save-btn" onClick={() => saveField(fieldKey, currentVal)} disabled={saving}>
-              {saving ? '…' : 'Save'}
-            </button>
-            <button className="profile-cancel-btn" onClick={() => setEditing(null)}>Cancel</button>
-          </>
-        ) : (
-          <button className="icon-btn" onClick={() => setEditing(fieldKey)}><IconEdit /></button>
-        ))}
-      </div>
-    </div>
-  )
 
   return (
     <div className="page-inner">
@@ -482,17 +509,42 @@ function ProfilePage({ authUser, authToken, onBack, onGoHistory, onUserUpdate, o
 
         {error && <p className="profile-error">{error}</p>}
 
-        <EditRow icon={<IconTranslate />} label="Native language"
-          value={getLangName(mainLang) + (mainLang ? ` (${mainLang.toUpperCase()})` : '')}
-          fieldKey="lang" setter={setMainLang} currentVal={mainLang} />
+        <div className="profile-row">
+          <div className="profile-row-left" style={{flex:1}}>
+            <span className="profile-row-icon"><IconTranslate /></span>
+            <div style={{flex:1,minWidth:0}}>
+              <div className="profile-row-label">Native language</div>
+              <div style={{marginTop:6}}>
+                <LanguageSelect value={mainLang} onChange={async v => {
+                  setMainLang(v)
+                  localStorage.setItem('translator_main_lang', v)
+                  onSessionReset?.()
+                  try {
+                    const { data } = await supabase.auth.updateUser({ data: { main_language: v } })
+                    if (onUserUpdate && data?.user) onUserUpdate(data.user)
+                  } catch {}
+                }} />
+              </div>
+            </div>
+          </div>
+        </div>
 
-        <EditRow icon={<IconMapPin />} label="Country you live in / Frequently translating into"
-          value={getCountryDisplay(country)}
-          fieldKey="country" setter={setCountry} currentVal={country} />
+        <div className="profile-row">
+          <div className="profile-row-left" style={{flex:1}}>
+            <span className="profile-row-icon"><IconMapPin /></span>
+            <div style={{flex:1,minWidth:0}}>
+              <div className="profile-row-label">Local / Frequently Used Language</div>
+              <div style={{marginTop:6}}>
+                <LanguageSelect value={country} onChange={v => {
+                  setCountry(v)
+                  localStorage.setItem(`user_country_${authUser?.id}`, v)
+                  onSessionReset?.()
+                }} placeholder="Local / Frequently Used Language…" />
+              </div>
+            </div>
+          </div>
+        </div>
 
-        {/* Timezone — read-only, auto from device */}
-        <EditRow icon={<IconGlobe />} label="Timezone (auto-detected)"
-          value={timezone} fieldKey="timezone" readOnly />
 
         {/* Preferred translation mode */}
         <div className={`profile-row profile-row--mode ${editingMode ? 'profile-row--mode-open' : ''}`}>
@@ -554,7 +606,7 @@ function ProfilePage({ authUser, authToken, onBack, onGoHistory, onUserUpdate, o
 // ─── HistoryPage ──────────────────────────────────────────────────────────────
 const LS_OPEN  = 'hist_open_days'
 
-function HistoryPage({ authToken, muted, onBack, onRetranslate, onSaveEdit }) {
+function HistoryPage({ authToken, muted, playbackSpeed = 1.0, onBack, onRetranslate, onSaveEdit, isPlayingGlobal, setIsPlayingGlobal }) {
   const [entries,    setEntries]    = useState([])
   const [loading,    setLoading]    = useState(true)
 
@@ -564,6 +616,17 @@ function HistoryPage({ authToken, muted, onBack, onRetranslate, onSaveEdit }) {
       e.client_entry_id === clientEntryId ? { ...e, ...updates, edited: true } : e
     ))
     onSaveEdit?.(clientEntryId, updates)
+  }
+
+  const handleDeleteEntry = async (clientEntryId) => {
+    if (!clientEntryId) return
+    setEntries(prev => prev.filter(e => e.client_entry_id !== clientEntryId))
+    try {
+      await fetch(`${API_BASE_URL}/history/${clientEntryId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${authToken}` },
+      })
+    } catch (err) { console.error('[delete entry]', err) }
   }
   const [openDays,   setOpenDays]   = useState(() => {
     try { return JSON.parse(localStorage.getItem(LS_OPEN) || '{}') } catch { return {} }
@@ -641,13 +704,22 @@ function HistoryPage({ authToken, muted, onBack, onRetranslate, onSaveEdit }) {
         /* Outer: scrolls through all session-groups */
         <div className="hist-outer-scroll">
           {(() => {
+            // Sort sessions oldest-first to assign numbers chronologically
+            const sortedAsc = Object.entries(grouped).sort(([, a], [, b]) => {
+              const tA = new Date(a[a.length - 1]?.created_at).getTime()
+              const tB = new Date(b[b.length - 1]?.created_at).getTime()
+              return tA - tB
+            })
             const dateCounters = {}
-            return Object.entries(grouped).map(([sessionId, sessionEntries]) => {
-              const sessionName  = sessionEntries[0]?.session_name || ''
+            const withNumbers = sortedAsc.map(([sessionId, sessionEntries]) => {
               const fallbackDate = new Date(sessionEntries[sessionEntries.length - 1]?.created_at).toLocaleDateString('ro-RO')
               if (!dateCounters[fallbackDate]) dateCounters[fallbackDate] = 0
               dateCounters[fallbackDate]++
-              const sessionNumber = dateCounters[fallbackDate]
+              return { sessionId, sessionEntries, fallbackDate, sessionNumber: dateCounters[fallbackDate] }
+            })
+            // Display newest-first (highest number on top)
+            return withNumbers.reverse().map(({ sessionId, sessionEntries, fallbackDate, sessionNumber }) => {
+              const sessionName  = sessionEntries[0]?.session_name || ''
               const sessionLabel  = sessionName || `Session ${sessionNumber}`
               return (
                 <div key={sessionId} className="history-group">
@@ -694,7 +766,7 @@ function HistoryPage({ authToken, muted, onBack, onRetranslate, onSaveEdit }) {
                   {openDays[sessionId] && (
                     <div className="hist-inner-scroll">
                       {sessionEntries.map((e, i) => (
-                        <TranslationCard key={e.client_entry_id || i} entry={e} muted={muted} onRetranslate={onRetranslate} onSaveEdit={handleSaveEditHistory} />
+                        <TranslationCard key={e.client_entry_id || i} entry={e} muted={muted} playbackSpeed={playbackSpeed} onRetranslate={onRetranslate} onSaveEdit={handleSaveEditHistory} onDelete={handleDeleteEntry} isPlayingGlobal={isPlayingGlobal} setIsPlayingGlobal={setIsPlayingGlobal} />
                       ))}
                     </div>
                   )}
@@ -750,7 +822,7 @@ function AuthModal({ initialMode = 'login', onClose, onModeChange }) {
     const meta = {
       username:       form.username.trim(),
       main_language:  (!skipOptional && form.main_language.trim()) ? form.main_language.trim() : null,
-      country:        (!skipOptional && form.country.trim())        ? form.country.trim().toUpperCase() : null,
+      country:        (!skipOptional && form.country.trim())        ? form.country.trim().toLowerCase() : null,
       preferred_mode: (!skipOptional && form.preferred_mode)        ? form.preferred_mode : null,
     }
     const { error: signUpError } = await supabase.auth.signUp({
@@ -869,10 +941,8 @@ function AuthModal({ initialMode = 'login', onClose, onModeChange }) {
               <p className="signup-step2-sub">All fields are optional — feel free to skip</p>
             </div>
 
-            <input className="field" placeholder="Native language (e.g. Romanian, English, ro, en)"
-              value={form.main_language} onChange={e => set('main_language', e.target.value)} autoFocus />
-            <input className="field" placeholder="Country (e.g. Romania, RO, United States)"
-              value={form.country} onChange={e => set('country', e.target.value)} />
+            <LanguageSelect value={form.main_language} onChange={v => set('main_language', v)} placeholder="Native Language…" />
+            <LanguageSelect value={form.country} onChange={v => set('country', v)} placeholder="Local / Frequently Used Language…" />
             <div className="signup-mode-wrap">
               <div className="signup-mode-label">Preferred translation mode <span>(optional)</span></div>
               <div className="mode-selector mode-selector--4 signup-mode-grid">
@@ -999,7 +1069,7 @@ function ResetPasswordModal({ onDone }) {
 }
 
 // ─── SettingsModal ────────────────────────────────────────────────────────────
-function SettingsModal({ translationMode, onModeChange, onClose }) {
+function SettingsModal({ translationMode, onModeChange, playbackSpeed, onSpeedChange, onClose }) {
   const MODES = [
     { id: 'speech-speech', label: 'Speech to Speech', sub: 'Speak & hear',
       icon: <><Mic size={20}/><span style={{opacity:.45,fontSize:'12px',margin:'0 2px'}}>→</span><Volume2 size={20}/></> },
@@ -1013,7 +1083,10 @@ function SettingsModal({ translationMode, onModeChange, onClose }) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
-        <h3 className="modal-title">Settings</h3>
+        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'4px'}}>
+          <h3 className="modal-title" style={{margin:0}}>Settings</h3>
+          <button onClick={onClose} style={{background:'none', border:'none', cursor:'pointer', color:'var(--text-secondary)', display:'flex', alignItems:'center', padding:'4px'}}><X size={18}/></button>
+        </div>
         <div className="settings-section-label">Translation Mode</div>
         <p className="settings-section-sub">Choose how you want to translate</p>
         <div className="mode-selector mode-selector--4">
@@ -1029,6 +1102,17 @@ function SettingsModal({ translationMode, onModeChange, onClose }) {
             </button>
           ))}
         </div>
+        <div className="settings-section-label" style={{marginTop:20}}>Audio Settings</div>
+        <div style={{background:'var(--surface-2)', borderRadius:10, padding:'12px 16px', marginBottom:10}}>
+          <div style={{fontWeight:600, fontSize:'0.9rem', color:'var(--text-primary)', marginBottom:12}}>Voice Speed</div>
+          <input type="range" min="0.5" max="1.5" step="0.25" value={playbackSpeed}
+            onChange={e => onSpeedChange(parseFloat(e.target.value))}
+            style={{width:'100%', accentColor:'var(--accent)'}}/>
+          <div style={{display:'flex', justifyContent:'space-between', fontSize:'0.75rem', color:'var(--text-muted)', marginTop:4}}>
+            <span>Slow</span><span>Normal</span><span>Fast</span>
+          </div>
+        </div>
+
         <button className="modal-submit" onClick={onClose} style={{marginTop:12}}>Done</button>
       </div>
     </div>
@@ -1050,14 +1134,14 @@ function UserDropdown({ authUser, avatarUrl, onProfile, onSettings, onLogout, on
     <div className="dropdown" ref={ref}>
       <div className="dropdown-header">
         <div style={{ display:'flex', alignItems:'center', gap:'10px', marginBottom:'6px' }}>
-          <div style={{ width:38, height:38, borderRadius:'50%', overflow:'hidden', flexShrink:0, background:'var(--color-surface2, #2a2d3a)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'16px', fontWeight:600 }}>
+          <div style={{ width:38, height:38, borderRadius:'50%', overflow:'hidden', flexShrink:0, background:'var(--btn-icon-bg)', color:'var(--text-primary)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'16px', fontWeight:600 }}>
             {avatarUrl
               ? <img src={avatarUrl} alt="avatar" style={{ width:'100%', height:'100%', objectFit:'cover' }} />
               : authUser.username?.[0]?.toUpperCase()}
           </div>
           <div>
             <div className="dropdown-username">{authUser.username}</div>
-            <div style={{ fontSize:'11px', opacity:0.55, marginTop:'1px', wordBreak:'break-all', lineHeight:1.4 }}>{authUser.email}</div>
+            <div style={{ fontSize:'11px', opacity:0.55, marginTop:'1px', whiteSpace:'nowrap', lineHeight:1.4 }}>{authUser.email}</div>
           </div>
         </div>
       </div>
@@ -1089,7 +1173,7 @@ function GuestDropdown({ onLogin, onSignup, onSettings, onClose }) {
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [theme, toggleTheme]       = useTheme()
-  const [muted, mutedRef, toggleMute, setMuted] = useMute()
+  const [muted, mutedRef, , setMuted] = useMute()
 
   const [authUser,  setAuthUser]  = useState(null)
   const [authToken, _setAuthToken] = useState('')
@@ -1100,8 +1184,28 @@ export default function App() {
   const [showAuth,          setShowAuth]          = useState(false)
   const [authInitMode,      setAuthInitMode]      = useState('login')
   const [showSettings,      setShowSettings]      = useState(false)
+  const [playbackSpeed,     setPlaybackSpeed]     = useState(() => parseFloat(localStorage.getItem('playback_speed') || '1.0'))
   const [showResetPassword, setShowResetPassword] = useState(false)
   const [page,              setPage]              = useState('main')
+
+  // Gestionare buton Back pe mobil
+  const navigateTo = useCallback((newPage) => {
+    if (newPage !== 'main') {
+      window.history.pushState({ page: newPage }, '')
+    }
+    setPage(newPage)
+  }, [])
+
+  useEffect(() => {
+    const handlePopState = (e) => {
+      const prev = e.state?.page
+      if (prev === 'history') setPage('history')
+      else if (prev === 'profile') setPage('profile')
+      else setPage('main')
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
 
   // Normalize Supabase user → shape the rest of the app expects
   const normalizeUser = (u) => u ? {
@@ -1116,10 +1220,9 @@ export default function App() {
 
   // Language context — derived from user profile + localStorage
   const nativeLang = authUser?.main_language || localStorage.getItem('translator_main_lang') || ''
-  const storedCountry = (
-    authUser?.id ? (localStorage.getItem(`user_country_${authUser.id}`) || '') : ''
-  ).toUpperCase()
-  const countryLang = countryToLang(storedCountry)
+  const countryLang = authUser?.id
+    ? (localStorage.getItem(`user_country_${authUser.id}`) || '')
+    : ''
   // Default target: native lang if set, else country lang, else 'en'
   const targetLang = nativeLang || countryLang || 'en'
 
@@ -1131,7 +1234,6 @@ export default function App() {
     return m
   })
   const isSpeechInput = translationMode.startsWith('speech')
-  const isSpeechOutput = translationMode.endsWith('speech')
 
   const changeMode = (m) => {
     setTranslationMode(m)
@@ -1147,6 +1249,7 @@ export default function App() {
   useEffect(() => { setMuted(!translationMode.endsWith('speech')) }, []) // eslint-disable-line
 
   // Translator state
+  const [isPlayingGlobal, setIsPlayingGlobal] = useState(false)
   const [isListening,  setIsListening]  = useState(false)
   const [isFinalizing, setIsFinalizing] = useState(false)
   const [isVoiceActive, setIsVoiceActive] = useState(false)
@@ -1170,9 +1273,12 @@ export default function App() {
   const sampleRateRef      = useRef(48000)
   const isCapturing        = useRef(false)
   const keepListening      = useRef(false)
+  const wasListeningRef    = useRef(false)
   const sessionIdRef       = useRef(`session_${Date.now()}_${Math.random().toString(36).slice(2,8)}`)
+  const resetSession       = useCallback(() => {
+    sessionIdRef.current = `session_${Date.now()}_${Math.random().toString(36).slice(2,8)}`
+  }, [])
   const persistedIdsRef    = useRef(new Set())
-  const [dbSavedCount, setDbSavedCount] = useState(0)
 
   // ── DB save helper ───────────────────────────────────────────────────────────
   const persistHistoryEntries = async (entries, tokenOverride = '') => {
@@ -1200,7 +1306,6 @@ export default function App() {
       const d = await r.json()
       if (d.status === 'success') {
         console.log(`[DB] ✓ Salvat ${unsaved.length} intrare(i) în Supabase`)
-        setDbSavedCount(n => n + unsaved.length)
       } else {
         // Save failed — remove from persisted set so it can be retried
         unsaved.forEach(e => persistedIdsRef.current.delete(e.client_entry_id))
@@ -1217,7 +1322,6 @@ export default function App() {
     await supabase.auth.signOut()
     setAuthUser(null); setAuthToken('')
     persistedIdsRef.current.clear()
-    setDbSavedCount(0)
     setPage('main')
   }
   const handleUserUpdate = (user) => setAuthUser(normalizeUser(user))
@@ -1238,13 +1342,23 @@ export default function App() {
     }
   }
 
+  const handleDeleteLog = async (clientEntryId) => {
+    if (!clientEntryId) return
+    setLogs(prev => prev.filter(e => e.client_entry_id !== clientEntryId))
+    if (authTokenRef.current) {
+      fetch(`${API_BASE_URL}/history/${encodeURIComponent(clientEntryId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${authTokenRef.current}` },
+      }).catch(e => console.warn('[delete] DB delete failed:', e))
+    }
+  }
+
   // Re-translate edited original text (used by TranslationCard after user edits)
-  const handleRetranslate = async (text) => {
-    const r = await fetch(`${API_BASE_URL}/translate_text`, {
+  const handleRetranslate = async (text, targetLangForced) => {
+    const r = await fetch(`${API_BASE_URL}/retranslate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      // no_memory: true → no chat history bleed-through between independent edits
-      body: JSON.stringify({ text, target_lang: targetLang, native_lang: nativeLang, country_lang: countryLang, no_memory: true }),
+      body: JSON.stringify({ text, target_lang: targetLangForced }),
     })
     return await r.json()
   }
@@ -1399,7 +1513,6 @@ export default function App() {
         source_lang: sL, target_lang: tL,
         original_text:   data.original_text   || '',
         translated_text: data.translated_text || '',
-        audio_url: null,
         created_at: new Date().toISOString(),
       }
 
@@ -1409,7 +1522,9 @@ export default function App() {
       if (data.audio_data && !mutedRef.current) {
         setStatus('Redau traducerea...')
         const url = base64ToUrl(data.audio_data)
-        await playAudioUrl(url)
+        setIsPlayingGlobal(true)
+        await playAudioUrl(url, playbackSpeed)
+        setIsPlayingGlobal(false)
         URL.revokeObjectURL(url)
       }
     } catch(e) { console.error(e); setStatus('Eroare server') }
@@ -1425,7 +1540,7 @@ export default function App() {
       const r = await fetch(`${API_BASE_URL}/translate_text`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, target_lang: targetLang, native_lang: nativeLang, country_lang: countryLang, user: 'text_user' }),
+        body: JSON.stringify({ text, native_lang: nativeLang, country_lang: countryLang, user: 'text_user', with_tts: !mutedRef.current }),
       })
       const d = await r.json()
       if (d.translated_text) {
@@ -1437,24 +1552,20 @@ export default function App() {
           target_lang: (d.lang || targetLang || 'en').toUpperCase(),
           original_text: text,
           translated_text: d.translated_text,
-          audio_url: null,
           created_at: new Date().toISOString(),
         }
         setLogs(prev => [entry, ...prev])
         if (authTokenRef.current) persistHistoryEntries([entry], authTokenRef.current)
         setTextInput('')
-        // Play TTS if not muted
-        if (!mutedRef.current && d.translated_text) {
-          try {
-            const ttsRes = await fetch(`${API_BASE_URL}/tts`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ text: d.translated_text, lang: (d.lang || targetLang).toLowerCase() }),
-            })
-            const ttsData = await ttsRes.json()
-            if (ttsData.audio_url) await playAudioUrl(ttsData.audio_url)
-            else speakText(d.translated_text, d.lang || targetLang)
-          } catch { speakText(d.translated_text, d.lang || targetLang) }
+        // Play TTS dacă a venit audio_data din backend
+        if (!mutedRef.current && d.audio_data) {
+          const url = base64ToUrl(d.audio_data)
+          setIsPlayingGlobal(true)
+          await playAudioUrl(url, playbackSpeed)
+          setIsPlayingGlobal(false)
+          URL.revokeObjectURL(url)
+        } else if (!mutedRef.current && d.translated_text) {
+          speakText(d.translated_text, d.lang || targetLang)
         }
       }
     } catch(e) { console.error(e) }
@@ -1521,7 +1632,7 @@ export default function App() {
       <header className="app-header">
         <div className="app-header-left">
           <div className="app-logo"><IconTranslate/></div>
-          <span className="app-title">Translator Live v2</span>
+          <span className="app-title">Hermes Translator</span>
         </div>
         <div className="app-header-right">
           <button className="header-icon-btn" onClick={toggleTheme} title="Toggle theme">
@@ -1539,15 +1650,15 @@ export default function App() {
             </button>
             {showDropdown && (authUser ? (
               <UserDropdown authUser={authUser} avatarUrl={headerAvatarUrl}
-                onProfile={() => { setPage('profile'); setShowDropdown(false) }}
-                onSettings={() => { setShowSettings(true); setShowDropdown(false) }}
+                onProfile={() => { navigateTo('profile'); setShowDropdown(false); if (isListening) { wasListeningRef.current = true; stopListening() } }}
+                onSettings={() => { setShowSettings(true); setShowDropdown(false); if (isListening) { wasListeningRef.current = true; stopListening() } }}
                 onLogout={() => { handleLogout(); setShowDropdown(false) }}
                 onClose={() => setShowDropdown(false)} />
             ) : (
               <GuestDropdown
                 onLogin={() => { openLogin(); setShowDropdown(false) }}
                 onSignup={() => { openSignup(); setShowDropdown(false) }}
-                onSettings={() => { setShowSettings(true); setShowDropdown(false) }}
+                onSettings={() => { setShowSettings(true); setShowDropdown(false); if (isListening) { wasListeningRef.current = true; stopListening() } }}
                 onClose={() => setShowDropdown(false)} />
             ))}
           </div>
@@ -1557,19 +1668,20 @@ export default function App() {
       {/* Profile page */}
       {page === 'profile' && (
         <div className="subpage-wrap">
-          <ProfilePage authUser={authUser} authToken={authToken}
-            onBack={() => setPage('main')}
-            onGoHistory={() => setPage('history')}
+          <ProfilePage authUser={authUser}
+            onBack={() => { navigateTo('main'); if (wasListeningRef.current) { wasListeningRef.current = false; toggleTranslator() } }}
+            onGoHistory={() => navigateTo('history')}
             onUserUpdate={handleUserUpdate}
             onAvatarChange={url => setHeaderAvatarUrl(url)}
-            onModeChange={changeMode} />
+            onModeChange={changeMode}
+            onSessionReset={resetSession} />
         </div>
       )}
 
       {/* History page — full height, scrollable */}
       {page === 'history' && (
         <div className="subpage-wrap subpage-wrap--hist">
-          <HistoryPage authToken={authToken} muted={muted} onBack={() => setPage('profile')} onRetranslate={handleRetranslate} onSaveEdit={handleSaveEdit} />
+          <HistoryPage authToken={authToken} muted={muted} playbackSpeed={playbackSpeed} onBack={() => navigateTo('profile')} onRetranslate={handleRetranslate} onSaveEdit={handleSaveEdit} isPlayingGlobal={isPlayingGlobal} setIsPlayingGlobal={setIsPlayingGlobal} />
         </div>
       )}
 
@@ -1613,7 +1725,7 @@ export default function App() {
             {logs.length > 0 ? (
               <div className="logs-list">
                 {logs.map(entry => (
-                  <TranslationCard key={entry.id} entry={entry} muted={muted} onRetranslate={handleRetranslate} onSaveEdit={handleSaveEdit}/>
+                  <TranslationCard key={entry.id} entry={entry} muted={muted} playbackSpeed={playbackSpeed} onRetranslate={handleRetranslate} onSaveEdit={handleSaveEdit} onDelete={handleDeleteLog} isPlayingGlobal={isPlayingGlobal} setIsPlayingGlobal={setIsPlayingGlobal}/>
                 ))}
               </div>
             ) : (
@@ -1633,7 +1745,8 @@ export default function App() {
       )}
       {showSettings && (
         <SettingsModal translationMode={translationMode} onModeChange={changeMode}
-          onClose={() => setShowSettings(false)}/>
+          playbackSpeed={playbackSpeed} onSpeedChange={(s) => { setPlaybackSpeed(s); localStorage.setItem('playback_speed', String(s)) }}
+          onClose={() => { setShowSettings(false); if (wasListeningRef.current) { wasListeningRef.current = false; toggleTranslator() } }}/>
       )}
     </div>
   )

@@ -56,7 +56,6 @@ print("[✓] Groq client inițializat cu succes")
 
 print("[✓] fast-langdetect disponibil")
 
-user_chat_histories = {}
 _timings: dict = {}          # colectare timpi pipeline per cerere
 
 # ─── Auth helper ──────────────────────────────────────────────────────────────
@@ -92,9 +91,6 @@ def normalize_whisper_lang(lang: str):
         return langcodes.find(l).language
     except Exception:
         return None
-
-# ─── AI translation ───────────────────────────────────────────────────────────
-
 
 # ─── Session-aware target language ────────────────────────────────────────────
 session_lang_pairs = {}   # session_id → {"detected": str, "target": str}
@@ -185,18 +181,20 @@ def compute_target_lang(detected_lang: str, session_id: str,
         return determine_target_lang(dl, native_lang, country_lang)
 
 
-def ai_agent_process(text, user="default", use_memory=True, target_lang="en"):
-    global user_chat_histories
-    if user not in user_chat_histories:
-        user_chat_histories[user] = []
-
+def ai_agent_process(text, target_lang="en"):
     system_content = f"""Ești un motor de traducere PRECIS. Urmează instrucțiunile STRICT.
 
 SARCINA TA EXACTĂ:
 1. Analizează cererea utilizatorului.
-2. Dacă textul conține o COMANDĂ explicită de traducere (ex: "translate to Spanish", "tradu în germană", "traduci in giapponese"): Identifică LIMBA ȚINTĂ și TEXTUL de tradus, DETERMINĂ CODUL ISO 639-1 CORECT al limbii țintă. si apoi TRADU textul ÎN ACEA LIMBĂ
-3. Dacă textul NU conține o COMANDĂ explicită de traducere, tradu OBLIGATORIU în limba cu codul ISO 639-1: "{target_lang}".
-4. Returnează NUMAI JSON: {{"text": "traducerea_exacta", "source_lang": "cod_sursa", "target_lang": "cod_tinta"}}
+2. Dacă textul conține o COMANDĂ explicită de traducere (ex: "translate to Spanish I want apples"):
+    - Identifică LIMBA ȚINTĂ și TEXTUL de tradus (ex: "Spanish", "I want apples")
+    - DETERMINĂ CODUL ISO 639-1 CORECT al limbii țintă (ex: "es")
+    - SALVEAZĂ 1 în "command"
+    - TRADU textul ÎN LIMBA identificată!!! (ex: "Quiero manzanas")
+3. Dacă textul NU conține o COMANDĂ explicită de traducere:
+    - SALVEAZĂ 0 în "command"
+    - Tradu OBLIGATORIU în limba cu codul ISO 639-1 acesta: "{target_lang}"
+4. Returnează NUMAI JSON: {{"text": "traducerea_exacta", "source_lang": "cod_sursa", "target_lang": "cod_tinta", "command":"command_bool"}}
 
 REGULI STRICTE:
 - CODUL LIMBII TREBUIE SĂ FIE ISO 639-1 CORECT: "en", "ro", "es", "fr", "de", "it", "pt", "zh", "ja", "ko", "ru", "ar", etc.
@@ -207,12 +205,10 @@ REGULI STRICTE:
 """
 
     try:
-        messages = [{"role": "system", "content": system_content}]
-
-        if use_memory and user_chat_histories[user]:
-            messages.extend(user_chat_histories[user][-2:])
-
-        messages.append({"role": "user", "content": text})
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": text},
+        ]
         print(f"[*] Trimit la Groq: {len(messages)} mesaje, text: {text[:50]}...")
 
         _t0 = time.perf_counter()
@@ -238,12 +234,6 @@ REGULI STRICTE:
             print(f"[⚠] Response JSON invalid: {result}")
             return {"text": text, "source_lang": "auto", "target_lang": "en"}
 
-        if use_memory:
-            user_chat_histories[user].append({"role": "user", "content": text})
-            user_chat_histories[user].append({"role": "assistant", "content": result["text"]})
-            if len(user_chat_histories[user]) > 4:
-                user_chat_histories[user] = user_chat_histories[user][-4:]
-
         return result
 
     except Exception as e:
@@ -252,7 +242,7 @@ REGULI STRICTE:
         return {"text": text, "source_lang": "auto", "target_lang": target_lang}
 
 def retranslate(text: str, target_lang: str) -> dict:
-    """Prompt minimal pentru când LLM nu a tradus (source==target) — fără ambiguitate."""
+    """Re-traducere cu prompt minimal când LLM nu a respectat limba țintă."""
     try:
         chat = client.chat.completions.create(
             messages=[
@@ -346,15 +336,31 @@ async def history_list(
             .order("created_at", desc=not is_asc)
             .execute()
         )
-        print(f"[history] User={user['username']} → {len(response.data)} intrări")
-        return {"status": "success", "entries": response.data}
+        entries = response.data or []
+
+        # Adaugă session_name din tabela sessions
+        sessions_resp = (
+            db.table("sessions")
+            .select("session_id, name")
+            .eq("user_id", user["id"])
+            .execute()
+        )
+        session_names = {
+            s["session_id"]: s.get("name")
+            for s in (sessions_resp.data or [])
+        }
+        for entry in entries:
+            entry["session_name"] = session_names.get(entry.get("session_id"))
+
+        print(f"[history] User={user['username']} → {len(entries)} intrări")
+        return {"status": "success", "entries": entries}
     except Exception as e:
         print(f"[history] ✗ Eroare: {e}")
         return {"status": "error", "message": str(e)}
 
 # ─── TTS on-demand endpoint ──────────────────────────────────────────────────
 @app.post("/tts")
-async def generate_tts_endpoint(request: Request, payload: dict, background_tasks: BackgroundTasks):
+async def generate_tts_endpoint(request: Request, payload: dict):
     """Generate TTS audio for any text+lang — used by history playback."""
     text = (payload.get("text") or "").strip()
     lang = (payload.get("lang") or "en").strip().lower()[:2]
@@ -378,107 +384,43 @@ async def generate_tts_endpoint(request: Request, payload: dict, background_task
         print(f"[✗] /tts eroare: {e}")
         return {"error": str(e)}
 
-# ─── Language normalizer endpoint ─────────────────────────────────────────────
-@app.post("/normalize_language")
-async def normalize_language(payload: dict):
-    """Convert any language name/alias to ISO 639-1 code using Groq."""
-    text = (payload.get("text") or "").strip()
-    if not text:
-        return {"iso_code": None}
-
-    if len(text) == 2 and text.isalpha():
-        return {"iso_code": text.lower()}
-
-    try:
-        chat = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a language code normalizer. "
-                        "Given any language name or alias in any language, "
-                        'return ONLY valid JSON: {"iso_code": "xx"} where xx is the '
-                        "ISO 639-1 two-letter code. If unknown, use null."
-                    )
-                },
-                {"role": "user", "content": f'Language: "{text}"'}
-            ],
-            model="llama-3.3-70b-versatile",
-            response_format={"type": "json_object"},
-            temperature=0,
-        )
-        result = json.loads(chat.choices[0].message.content)
-        code = (result.get("iso_code") or "").strip().lower()[:2] or None
-        print(f"[✓] normalize_language '{text}' → '{code}'")
-        return {"iso_code": code}
-    except Exception as e:
-        print(f"[✗] normalize_language eroare: {e}")
-        return {"iso_code": text.lower()[:2] if len(text) >= 2 else None}
-
-# ─── Country normalizer endpoint ──────────────────────────────────────────────
-@app.post("/normalize_country")
-async def normalize_country(payload: dict):
-    """Convert any country name/alias to ISO 3166-1 alpha-2 code using Groq."""
-    text = (payload.get("text") or "").strip()
-    if not text:
-        return {"iso_code": None, "name": None}
-
-    if len(text) == 2 and text.isalpha():
-        return {"iso_code": text.upper(), "name": None}
-
-    try:
-        chat = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a country code normalizer. "
-                        "Given any country name or alias in any language, "
-                        'return ONLY valid JSON: {"iso_code": "XX", "name": "Full Country Name in English"} '
-                        "where XX is the ISO 3166-1 alpha-2 two-letter code in UPPERCASE. "
-                        "If unknown, return null for both fields."
-                    )
-                },
-                {"role": "user", "content": f'Country: "{text}"'}
-            ],
-            model="llama-3.3-70b-versatile",
-            response_format={"type": "json_object"},
-            temperature=0,
-        )
-        result = json.loads(chat.choices[0].message.content)
-        code = (result.get("iso_code") or "").strip().upper()[:2] or None
-        name = (result.get("name") or "").strip() or None
-        print(f"[✓] normalize_country '{text}' → '{code}' ({name})")
-        return {"iso_code": code, "name": name}
-    except Exception as e:
-        print(f"[✗] normalize_country eroare: {e}")
-        return {"iso_code": text.upper()[:2] if len(text) >= 2 else None, "name": None}
-
-# ─── AI translate endpoint ────────────────────────────────────────────────────
-@app.post("/ai_translate")
-async def ai_translate(payload: dict, authorization: str = Header(default="")):
-    text         = payload.get("text", "").strip()
-    native_lang  = payload.get("native_lang", "")
-    country_lang = payload.get("country_lang", "")
-    user_key     = payload.get("user", "default")
+@app.post("/retranslate")
+async def retranslate_endpoint(payload: dict):
+    """Re-traducere după editarea unui card — target cunoscut, prompt minimal."""
+    text        = (payload.get("text") or "").strip()
+    target_lang = (payload.get("target_lang") or "en").strip().lower()
     if not text:
         return {"status": "failed", "error": "text gol"}
+    result = retranslate(text, target_lang)
+    return {
+        "status":          "success",
+        "translated_text": result.get("text", text),
+        "source_lang":     result.get("source_lang", "auto"),
+        "lang":            result.get("target_lang", target_lang),
+    }
 
-    detected    = detect_text_lang(text)
-    target_lang = determine_target_lang(detected, native_lang, country_lang)
-    result = ai_agent_process(text, user_key, target_lang=target_lang)
 
-    token = authorization.replace("Bearer ", "").strip()
-    current_user = get_user_from_token(token)
-    if current_user:
-        save_history_entries(current_user["id"], [{
-            "source_lang":     result.get("source_lang", "auto"),
-            "target_lang":     result.get("target_lang", "en"),
-            "original_text":   text,
-            "translated_text": result.get("text", ""),
-        }], token=token)
-
-    return result
+@app.delete("/history/{client_entry_id}")
+async def delete_history_entry(client_entry_id: str, authorization: str = Header(None)):
+    """Delete a single history entry by client_entry_id."""
+    token = (authorization or "").replace("Bearer ", "").strip()
+    if not token:
+        return {"status": "error", "message": "Unauthorized"}
+    user = get_user_from_token(token)
+    if not user:
+        return {"status": "error", "message": "Invalid token"}
+    try:
+        db = _authed_client(token)
+        db.table("translation_history_v2") \
+            .delete() \
+            .eq("client_entry_id", client_entry_id) \
+            .eq("user_id", user["id"]) \
+            .execute()
+        print(f"[DB] ✓ Entry {client_entry_id[:8]}… deleted")
+        return {"status": "success"}
+    except Exception as e:
+        print(f"[DB] ✗ Delete failed: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.patch("/history/{client_entry_id}")
 async def update_history_entry(client_entry_id: str, payload: dict, authorization: str = Header(None)):
@@ -523,11 +465,11 @@ async def rename_session(session_id: str, payload: dict, authorization: str = He
     name = (payload.get("name") or "").strip()
     try:
         db = _authed_client(token)
-        db.table("translation_history_v2") \
-            .update({"session_name": name if name else None}) \
-            .eq("session_id", session_id) \
-            .eq("user_id", user["id"]) \
-            .execute()
+        db.table("sessions").upsert({
+            "session_id": session_id,
+            "user_id":    user["id"],
+            "name":       name if name else None,
+        }).execute()
         print(f"[DB] ✓ Session {session_id[:8]}… renamed to '{name}'")
         return {"status": "success"}
     except Exception as e:
@@ -539,8 +481,7 @@ async def translate_text(payload: dict):
     text         = payload.get("text", "").strip()
     native_lang  = payload.get("native_lang", "")
     country_lang = payload.get("country_lang", "")
-    user_key     = payload.get("user", "live_user")
-    no_memory    = payload.get("no_memory", False)
+    with_tts     = payload.get("with_tts", False)
     if not text:
         return {"status": "failed", "error": "text gol"}
 
@@ -552,43 +493,61 @@ async def translate_text(payload: dict):
     target_lang = determine_target_lang(detected, native_lang, country_lang)
     print(f"[text] fast-langdetect: '{detected}' → target: '{target_lang}'")
 
-    # Memory dezactivat: contextul anterior confuza LLM-ul cu noul prompt directiv
-    result = ai_agent_process(text, user=user_key, use_memory=False,
-                              target_lang=target_lang)
+    result = ai_agent_process(text, target_lang=target_lang)
 
+    llm_ms_first = _timings.get('llm_ms', 0)
+    llm_ms_retry = 0
     retranslated = False
     llm_source   = (result.get("source_lang") or "").strip().lower()
     llm_target   = (result.get("target_lang") or "").strip().lower()
 
     if llm_source and llm_source != detected:
-        # fast-langdetect a greșit — recalculăm target cu sursa corectă de la LLM
         corrected_target = determine_target_lang(llm_source, native_lang, country_lang)
         if corrected_target != llm_target:
-            # Target-ul s-ar schimba — merită re-tradus
             print(f"[text] Re-traducere: fast='{detected}' llm_src='{llm_source}' "
                   f"old_target='{llm_target}' new_target='{corrected_target}'")
-            result      = ai_agent_process(text, user=user_key, use_memory=False,
-                                           target_lang=corrected_target)
-            target_lang = corrected_target
-            retranslated = True
+            result        = ai_agent_process(text, target_lang=corrected_target)
+            llm_ms_retry  = _timings.get('llm_ms', 0)
+            target_lang   = corrected_target
+            retranslated  = True
 
-    _t_total1 = time.perf_counter()
-    llm_ms_total = _timings.get('llm_ms', 0)
+    llm_ms_total    = llm_ms_first
+    translated_text = result.get("text", text)
+    final_lang      = result.get("target_lang", target_lang)
+
+    audio_b64 = None
+    tts_ms = 0
+    if with_tts and translated_text:
+        _t_tts0 = time.perf_counter()
+        unique_id  = str(uuid.uuid4())
+        output_mp3 = f"tts_{unique_id}.mp3"
+        try:
+            gTTS(text=translated_text, lang=final_lang).save(output_mp3)
+        except Exception:
+            gTTS(text=translated_text, lang="en").save(output_mp3)
+        with open(output_mp3, "rb") as f:
+            audio_b64 = base64.b64encode(f.read()).decode()
+        if os.path.exists(output_mp3): os.remove(output_mp3)
+        tts_ms = (time.perf_counter() - _t_tts0) * 1000
+
+    retry_line = f"  {'Llama retry':22} {llm_ms_retry:>7.0f} ms\n" if retranslated else ""
+    tts_line   = f"  {'gTTS  (TTS)':22} {tts_ms:>7.0f} ms\n" if with_tts else ""
     print(
         f"\n{'─' * 48}\n"
         f"  {'fast-langdetect':22} {(_t_det1 - _t_det0) * 1000:>7.0f} ms\n"
-        f"  {'Llama 3.3-70B (LLM)':22} {llm_ms_total:>7.0f} ms"
-        + (f" + re-traducere" if retranslated else "") +
-        f"\n  {'─' * 32}\n"
-        f"  {'TOTAL':22} {(_t_total1 - _t_total0) * 1000:>7.0f} ms\n"
+        f"  {'Llama 3.3-70B (LLM)':22} {llm_ms_total:>7.0f} ms\n"
+        + retry_line + tts_line +
+        f"  {'─' * 32}\n"
+        f"  {'TOTAL':22} {(time.perf_counter() - _t_total0) * 1000:>7.0f} ms\n"
         f"{'─' * 48}\n"
     )
 
     return {
         "status":          "success",
-        "translated_text": result.get("text", text),
+        "translated_text": translated_text,
         "source_lang":     result.get("source_lang", detected),
-        "lang":            result.get("target_lang", target_lang),
+        "lang":            final_lang,
+        "audio_data":      audio_b64,
     }
 
 # ─── Audio processing endpoint ────────────────────────────────────────────────
@@ -644,9 +603,6 @@ async def process_audio(
             if os.path.exists(input_audio): os.remove(input_audio)
             return {"status": "ignored"}
 
-        token        = authorization.replace("Bearer ", "").strip()
-        current_user = get_user_from_token(token)
-
         # Whisper's language detection is more reliable than AI's source_lang guess
         whisper_lang = normalize_whisper_lang(getattr(transcription, "language", None))
         detected     = whisper_lang or "auto"
@@ -655,26 +611,23 @@ async def process_audio(
         # Determină limba țintă (cu mecanismul de continuare a conversației pe sesiune)
         tgt = compute_target_lang(detected, session_id, native_lang, country_lang)
 
-        ai_result = ai_agent_process(
-            original_text, user="audio_user",
-            use_memory=False, target_lang=tgt,
-        )
+        ai_result = ai_agent_process(original_text, target_lang=tgt)
         print(f"[*] AI Result: {ai_result}")
 
-        # Dacă LLM nu a tradus (source == target) → re-traducere cu prompt minimal
-        if ai_result.get("source_lang") == ai_result.get("target_lang"):
-            print(f"[⚠] source==target=='{ai_result.get('source_lang')}' → re-traducere")
+        llm_target = (ai_result.get("target_lang") or "").strip().lower()
+        command    = int(ai_result.get("command", 0))
+
+        # Dacă nu e comandă explicită și LLM a tradus în altă limbă decât tgt → re-traducere
+        if command == 0 and llm_target != tgt:
+            print(f"[⚠] command=0, llm_target='{llm_target}' != tgt='{tgt}' → re-traducere")
             _t_retry0 = time.perf_counter()
             ai_result = retranslate(original_text, tgt)
             _t_retry1 = time.perf_counter()
             _timings['retry_ms'] = (_t_retry1 - _t_retry0) * 1000
+            llm_target = (ai_result.get("target_lang") or tgt).strip().lower()
 
         translated_text = ai_result.get("text", original_text)
         source_lang     = whisper_lang or ai_result.get("source_lang") or "auto"
-
-        # Normalizează limba țintă: folosim valoarea LLM doar dacă e cod ISO valid (2 litere)
-        # altfel folosim tgt calculat de noi (întotdeauna cod ISO corect)
-        llm_target = (ai_result.get("target_lang") or "").strip().lower()
         final_target_lang = llm_target if (len(llm_target) == 2 and llm_target.isalpha()) else tgt
 
         print(f"[DIR] whisper='{whisper_lang}' detected='{detected}' tgt='{tgt}' llm_target='{llm_target}' final='{final_target_lang}'")
@@ -687,6 +640,10 @@ async def process_audio(
                 "target":   final_target_lang,
             }
             print(f"[SESSION] {session_id[:8]}… salvat: {detected} → {final_target_lang}")
+            # Cleanup: păstrăm maxim 500 sesiuni în memorie
+            if len(session_lang_pairs) > 500:
+                oldest = list(session_lang_pairs.keys())[0]
+                del session_lang_pairs[oldest]
 
         _t_tts0 = time.perf_counter()
         try:
