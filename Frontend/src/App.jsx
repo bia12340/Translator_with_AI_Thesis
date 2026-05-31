@@ -245,7 +245,7 @@ function TranslationCard({ entry, muted, playbackSpeed = 1.0, onRetranslate, onS
   }
 
   const handlePlay = async () => {
-    if (muted) return
+    if (muted || isPlayingGlobal || playing) return
     const text = displayTrans
     if (!text) return
     setPlaying(true)
@@ -513,7 +513,7 @@ function ProfilePage({ authUser, onBack, onGoHistory, onUserUpdate, onAvatarChan
           <div className="profile-row-left" style={{flex:1}}>
             <span className="profile-row-icon"><IconTranslate /></span>
             <div style={{flex:1,minWidth:0}}>
-              <div className="profile-row-label">Native language</div>
+              <div className="profile-row-label">Native Language</div>
               <div style={{marginTop:6}}>
                 <LanguageSelect value={mainLang} onChange={async v => {
                   setMainLang(v)
@@ -725,7 +725,7 @@ function HistoryPage({ authToken, muted, playbackSpeed = 1.0, onBack, onRetransl
                 <div key={sessionId} className="history-group">
 
                   {/* Session header */}
-                  <div className="history-group-header" onClick={() => toggleDay(sessionId)}>
+                  <div className={`history-group-header${editingDay === sessionId ? ' history-group-header--editing' : ''}`} onClick={() => toggleDay(sessionId)}>
                     <div className="history-group-left">
                       <span className="history-chevron">
                         {openDays[sessionId] ? <IconChevD /> : <IconChevR />}
@@ -733,9 +733,8 @@ function HistoryPage({ authToken, muted, playbackSpeed = 1.0, onBack, onRetransl
 
                       {editingDay === sessionId ? (
                         <div className="day-rename-wrap" onClick={e => e.stopPropagation()}>
-                          <span className="history-day-date">{fallbackDate} —</span>
                           <input className="day-rename-input" value={editName} autoFocus
-                            placeholder="Session name…"
+                            placeholder={`${fallbackDate} — Session name…`}
                             onChange={e => setEditName(e.target.value)}
                             onKeyDown={e => {
                               if (e.key === 'Enter')  confirmRename(e, sessionId)
@@ -1325,8 +1324,14 @@ export default function App() {
     setPage('main')
   }
   const handleUserUpdate = (user) => setAuthUser(normalizeUser(user))
-  const openLogin  = () => { setAuthInitMode('login');  setShowAuth(true) }
-  const openSignup = () => { setAuthInitMode('signup'); setShowAuth(true) }
+  const openLogin  = () => {
+    if (isListening) { wasListeningRef.current = true; stopListening() }
+    setAuthInitMode('login');  setShowAuth(true)
+  }
+  const openSignup = () => {
+    if (isListening) { wasListeningRef.current = true; stopListening() }
+    setAuthInitMode('signup'); setShowAuth(true)
+  }
 
   // Persist an edited card — update logs state + PATCH DB
   const handleSaveEdit = (clientEntryId, updates) => {
@@ -1572,6 +1577,17 @@ export default function App() {
     finally { setTextLoading(false); setStatus('Press the button to start.') }
   }
 
+  const handleStop = async () => {
+    keepListening.current = false
+    setIsListening(false)
+    setStatus('Se procesează ultima înregistrare...')
+    if (isCapturing.current && pcmChunks.current.length > 0) {
+      await stopCurrentCaptureAndProcess()
+    }
+    stopListening()
+    setStatus('Stopped.')
+  }
+
   const toggleTranslator = async () => {
     if (mediaAudioContext.current?.state === 'suspended') await mediaAudioContext.current.resume()
     if (!isListening) {
@@ -1698,6 +1714,12 @@ export default function App() {
                 {isFinalizing ? <IconTranslate/> : <IconMic/>}
                 <span>{isFinalizing ? 'Translating…' : isListening ? 'Listening…' : 'Start Listening'}</span>
               </button>
+              {isListening && !isFinalizing && (
+                <button className="stop-pill" onClick={handleStop}>
+                  <X size={14}/>
+                  <span>Stop</span>
+                </button>
+              )}
             </div>
           ) : (
             <div className="text-translate-wrap">
@@ -1738,7 +1760,7 @@ export default function App() {
       )}
 
       {showAuth && (
-        <AuthModal initialMode={authInitMode} onClose={() => setShowAuth(false)} onModeChange={changeMode} />
+        <AuthModal initialMode={authInitMode} onClose={() => { setShowAuth(false); if (wasListeningRef.current) { wasListeningRef.current = false; toggleTranslator() } }} onModeChange={changeMode} />
       )}
       {showResetPassword && (
         <ResetPasswordModal onDone={() => { setShowResetPassword(false); setPage('main') }} />

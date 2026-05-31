@@ -164,7 +164,15 @@ input  { font-family: var(--font) }
 }
 
 /* ─── Listening pill ─────────────────────────────────────────────────────────── */
-.listen-btn-wrap { display: flex; justify-content: center }
+.listen-btn-wrap { display: flex; justify-content: center; align-items: center; gap: 10px }
+.stop-pill {
+  display: flex; align-items: center; gap: 7px;
+  padding: 12px 20px; border-radius: 999px;
+  background: rgba(239,68,68,0.12); border: 1.5px solid rgba(239,68,68,0.4);
+  color: #ef4444; font-size: 0.9rem; font-weight: 600;
+  transition: background-color 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+.stop-pill:hover { background: rgba(239,68,68,0.22); border-color: #ef4444; box-shadow: 0 4px 16px rgba(239,68,68,0.2) }
 .listen-pill {
   display: flex; align-items: center; gap: 9px;
   padding: 12px 26px; border-radius: 999px;
@@ -392,6 +400,8 @@ input  { font-family: var(--font) }
 .history-edit-btn { width: 28px; height: 28px; flex-shrink: 0 }
 
 /* Rename row */
+.history-group-header--editing .history-group-right { display: none }
+.history-group-header--editing .history-group-left { width: 100% }
 .day-rename-wrap { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0 }
 .day-rename-input {
   flex: 1; min-width: 0; background: var(--bg);
