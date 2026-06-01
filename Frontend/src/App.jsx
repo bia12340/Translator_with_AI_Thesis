@@ -1631,6 +1631,7 @@ export default function App() {
   const stopListening = () => {
     keepListening.current = false; isCapturing.current = false
     stopSpeechMonitor(); setIsListening(false)
+    setVoiceActive(false); setIsFinalizing(false)
     mediaStream.current?.getTracks().forEach(t => t.stop()); mediaStream.current = null
     if (mediaProcessor.current) {
       mediaProcessor.current.disconnect(); mediaProcessor.current.onaudioprocess = null; mediaProcessor.current = null
