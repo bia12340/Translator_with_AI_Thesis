@@ -453,6 +453,31 @@ async def update_history_entry(client_entry_id: str, payload: dict, authorizatio
         return {"status": "error", "message": str(e)}
 
 
+@app.post("/sessions")
+async def create_session(payload: dict, authorization: str = Header(None)):
+    """Create a new session entry in the sessions table."""
+    token = (authorization or "").replace("Bearer ", "").strip()
+    if not token:
+        return {"status": "error", "message": "Unauthorized"}
+    user = get_user_from_token(token)
+    if not user:
+        return {"status": "error", "message": "Invalid token"}
+    session_id = (payload.get("session_id") or "").strip()
+    if not session_id:
+        return {"status": "error", "message": "session_id required"}
+    try:
+        db = _authed_client(token)
+        db.table("sessions").upsert({
+            "session_id": session_id,
+            "user_id":    user["id"],
+            "name":       None,
+        }).execute()
+        print(f"[DB] ✓ Session {session_id[:8]}… created")
+        return {"status": "success"}
+    except Exception as e:
+        print(f"[DB] ✗ Session create failed: {e}")
+        return {"status": "error", "message": str(e)}
+
 @app.patch("/session/{session_id}")
 async def rename_session(session_id: str, payload: dict, authorization: str = Header(None)):
     """Rename a session by updating session_name for all its entries."""

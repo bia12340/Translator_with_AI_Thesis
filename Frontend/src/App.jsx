@@ -1274,9 +1274,24 @@ export default function App() {
   const keepListening      = useRef(false)
   const wasListeningRef    = useRef(false)
   const sessionIdRef       = useRef(`session_${Date.now()}_${Math.random().toString(36).slice(2,8)}`)
+  const initSession = useCallback(async (sessionId) => {
+    if (!authTokenRef.current) return
+    try {
+      await fetch(`${API_BASE_URL}/sessions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authTokenRef.current}`,
+        },
+        body: JSON.stringify({ session_id: sessionId }),
+      })
+    } catch (e) { console.warn('[session init]', e) }
+  }, [])
+
   const resetSession       = useCallback(() => {
     sessionIdRef.current = `session_${Date.now()}_${Math.random().toString(36).slice(2,8)}`
-  }, [])
+    initSession(sessionIdRef.current)
+  }, [initSession])
   const persistedIdsRef    = useRef(new Set())
 
   // ── DB save helper ───────────────────────────────────────────────────────────
@@ -1393,6 +1408,7 @@ export default function App() {
         // Upload anything captured while logged out
         if (event === 'SIGNED_IN') {
           await persistHistoryEntries(logs, session.access_token)
+          initSession(sessionIdRef.current)
         }
       } else {
         setAuthToken('')
@@ -1577,13 +1593,8 @@ export default function App() {
     finally { setTextLoading(false); setStatus('Press the button to start.') }
   }
 
-  const handleStop = async () => {
-    keepListening.current = false
-    setIsListening(false)
-    setStatus('Se procesează ultima înregistrare...')
-    if (isCapturing.current && pcmChunks.current.length > 0) {
-      await stopCurrentCaptureAndProcess()
-    }
+  const handleDiscard = () => {
+    pcmChunks.current = []
     stopListening()
     setStatus('Stopped.')
   }
@@ -1594,8 +1605,15 @@ export default function App() {
       keepListening.current = true; setIsListening(true)
       setStatus('Active — listening...'); startListening()
     } else {
-      keepListening.current = false; setIsListening(false)
-      setStatus('Stopped.'); stopListening()
+      // Forțează procesarea buffer-ului curent și oprește microfonul
+      keepListening.current = false
+      setIsListening(false)
+      setStatus('Se procesează...')
+      if (isCapturing.current && pcmChunks.current.length > 0) {
+        await stopCurrentCaptureAndProcess()
+      }
+      stopListening()
+      setStatus('Stopped.')
     }
   }
 
@@ -1710,17 +1728,18 @@ export default function App() {
               <button
                 className={`listen-pill ${isListening ? 'listen-pill--active' : ''}`}
                 onClick={toggleTranslator}
-                disabled={isFinalizing || isVoiceActive}>
+                disabled={isFinalizing}>
                 <span className={`mic-dot ${isListening ? 'mic-dot--pulse' : ''}`}/>
                 {isFinalizing ? <IconTranslate/> : <IconMic/>}
                 <span>{isFinalizing ? 'Translating…' : isListening ? 'Listening…' : 'Start Listening'}</span>
               </button>
-              {isListening && !isFinalizing && (
-                <button className="stop-pill" onClick={handleStop}>
-                  <X size={14}/>
-                  <span>Stop</span>
-                </button>
-              )}
+              <button
+                className="stop-pill"
+                onClick={handleDiscard}
+                disabled={!isListening || isFinalizing}>
+                <X size={14}/>
+                <span>Discard</span>
+              </button>
             </div>
           ) : (
             <div className="text-translate-wrap">
@@ -1743,8 +1762,12 @@ export default function App() {
           )}
 
           <div className="live-card">
-            <h3 className="section-title">Live Translations</h3>
-            <p className="section-sub">Your speech is automatically transcribed and translated in real-time</p>
+            <h3 className="section-title">{{
+              'speech-speech': 'Speech to Speech Translation',
+              'speech-text':   'Speech to Text Translation',
+              'text-text':     'Text to Text Translation',
+              'text-speech':   'Text to Speech Translation',
+            }[translationMode] || 'Translation'}</h3>
             {logs.length > 0 ? (
               <div className="logs-list">
                 {logs.map(entry => (
@@ -1752,9 +1775,16 @@ export default function App() {
                 ))}
               </div>
             ) : (
-              <p className="hint-center">
-                {isSpeechInput ? 'Press the button above and start speaking.' : 'Type something above and press Translate.'}
-              </p>
+              <>
+                <p className={'hint-center'}>
+                  {isSpeechInput
+                    ? 'Pause briefly between speakers to trigger translation, or press the mic button to translate immediately. Press Discard to cancel the current recording without translating.'
+                    : 'Type something above and press Translate.'}
+                </p>
+                <p className={'hint-center'}>
+                  {'You can also specify the target language by ' + (isSpeechInput ? 'saying' : 'typing') + ', for example, “Translate to French”.'}
+                </p>
+              </>
             )}
           </div>
         </main>

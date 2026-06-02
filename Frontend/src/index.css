@@ -172,10 +172,11 @@ input  { font-family: var(--font) }
   color: #ef4444; font-size: 0.9rem; font-weight: 600;
   transition: background-color 0.2s, border-color 0.2s, box-shadow 0.2s;
 }
-.stop-pill:hover { background: rgba(239,68,68,0.22); border-color: #ef4444; box-shadow: 0 4px 16px rgba(239,68,68,0.2) }
+.stop-pill:hover:not(:disabled) { background: rgba(239,68,68,0.22); border-color: #ef4444; box-shadow: 0 4px 16px rgba(239,68,68,0.2) }
+.stop-pill:disabled { opacity: 0.35; cursor: not-allowed; }
 .listen-pill {
-  display: flex; align-items: center; gap: 9px;
-  padding: 12px 26px; border-radius: 999px;
+  display: flex; align-items: center; justify-content: center; gap: 9px;
+  padding: 12px 26px; border-radius: 999px; width: 210px;
   background: var(--listen-bg); border: 1.5px solid var(--listen-border);
   color: var(--listen-text); font-size: 0.95rem; font-weight: 600;
   box-shadow: 0 2px 10px rgba(0,0,0,0.07);
@@ -549,7 +550,7 @@ input  { font-family: var(--font) }
 /* ─── Text translate input ────────────────────────────────────────────────────── */
 .text-translate-wrap {
   display:flex; flex-direction:column; gap:10px;
-  width:100%; max-width:480px; align-items:center;
+  width:100%; max-width:740px; align-items:center;
 }
 .text-translate-input {
   width:100%; padding:14px 16px; border-radius:14px;
