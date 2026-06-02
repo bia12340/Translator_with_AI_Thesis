@@ -77,7 +77,7 @@ const FlagImg = ({ code }) => {
 // ─── Language select  ────────────────
 const SELECTED_COUNTRIES = [
   'GB','US','DE','AT','NL','SE','DK','NO','IS','FI',             // English, German, Dutch, Nordic
-  'RO','ES','MX','AR','PT','BR','FR','BE','IT',                  // Romanian, Spanish, Portuguese, French, Italian
+  'RO','ES','AR','MX','PT','BR','FR','BE','IT',                  // Romanian, Spanish, Portuguese, French, Italian
   'RU','UA','PL','CZ','SK','BG','HR','RS','SI','BA','MK','BY',   // Limbi Slavice
   'AD','HU','GR','AL','MT','EE','LV','LT','GE','AM',             // Alte limbi europene + Catalan
   'TR','AZ','KZ',                                                // Turco-altaice

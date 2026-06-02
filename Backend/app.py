@@ -285,7 +285,7 @@ def save_history_entries(user_id: str, entries: list, token: str = None):
         if entry.get("created_at"):
             row["created_at"] = entry["created_at"]
         try:
-            result = db.table("translation_history_v2").insert(row).execute()
+            result = db.table("translation_history").insert(row).execute()
             if result.data:
                 saved += 1
             else:
@@ -330,7 +330,7 @@ async def history_list(
         is_asc = order.lower() == "asc"
         db = _authed_client(token)
         response = (
-            db.table("translation_history_v2")
+            db.table("translation_history")
             .select("*")
             .eq("user_id", user["id"])
             .order("created_at", desc=not is_asc)
@@ -411,7 +411,7 @@ async def delete_history_entry(client_entry_id: str, authorization: str = Header
         return {"status": "error", "message": "Invalid token"}
     try:
         db = _authed_client(token)
-        db.table("translation_history_v2") \
+        db.table("translation_history") \
             .delete() \
             .eq("client_entry_id", client_entry_id) \
             .eq("user_id", user["id"]) \
@@ -441,7 +441,7 @@ async def update_history_entry(client_entry_id: str, payload: dict, authorizatio
         return {"status": "error", "message": "No fields to update"}
     try:
         db = _authed_client(token)
-        db.table("translation_history_v2") \
+        db.table("translation_history") \
             .update(updates) \
             .eq("client_entry_id", client_entry_id) \
             .eq("user_id", user["id"]) \
