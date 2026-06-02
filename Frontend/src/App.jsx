@@ -3,10 +3,10 @@ import { supabase } from './supabaseClient'
 import {
   Sun, Moon, User, Copy, Volume2, VolumeX, Mic,
   LogOut, Settings, ChevronRight, ChevronDown, Pencil, Trash2,
-  Clock, Globe, MapPin, Languages, History, LogIn,
+  Clock, MapPin, Languages, History, LogIn,
   UserPlus, Camera, Eye, EyeOff, FileText, Keyboard, X,
 } from 'lucide-react'
-import { getCountryDataList, getCountryData } from 'countries-list'
+import { getCountryData } from 'countries-list'
 import ISO6391 from 'iso-639-1'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:7860';
@@ -51,7 +51,6 @@ const IconChevD    = () => <ChevronDown size={16} />
 const IconEdit     = ({ size=14 }) => <Pencil size={size} />
 const IconTrash    = ({ size=14 }) => <Trash2 size={size} />
 const IconClock    = () => <Clock size={12} />
-const IconGlobe    = () => <Globe size={16} />
 const IconMapPin   = () => <MapPin size={16} />
 const IconTranslate= () => <Languages size={22} />
 const IconHistory  = () => <History size={16} />
